@@ -1,4 +1,8 @@
 const {
+  normalizeEmoji,
+  isDiscordEmoji,
+} = require("../../packages/shared/emoji");
+const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
@@ -11,7 +15,10 @@ const {
 
 async function validateRole(guild, id) {
   const me = guild.members.me || (await guild.members.fetchMe());
-  const role = await guild.roles.fetch(id).catch(() => null);
+  const role = await guild.roles.fetch(id).catch((error) => {
+    if (error.code === 10011) return null;
+    throw error;
+  });
   if (
     !me.permissions.has(P.ManageRoles) ||
     !role ||
@@ -70,7 +77,14 @@ function roleDelta(resources, resource, current, chosenIds, toggle = false) {
 }
 function rolePayload(resource) {
   const data = resource.data,
-    options = data.options || [];
+    options = (data.options || []).map((option) => ({
+      ...option,
+      emoji: normalizeEmoji(option.emoji),
+    }));
+  if (options.some((option) => !isDiscordEmoji(option.emoji)))
+    throw new UserError(
+      "Emoji inválido em uma opção do painel. Use um único emoji ou o formato <:nome:id>.",
+    );
   if (
     !options.length ||
     options.length > 25 ||
@@ -126,9 +140,10 @@ function rolePayload(resource) {
 }
 function createRoles(ctx) {
   async function validate(guild, resource) {
+    const payload = rolePayload(resource);
     for (const option of resource.data.options || [])
       await validateRole(guild, option.roleId);
-    return rolePayload(resource);
+    return payload;
   }
   async function apply(guild, resource, userId, chosen, toggle) {
     const resources = await ctx.resources.list(guild.id, "role_panel");

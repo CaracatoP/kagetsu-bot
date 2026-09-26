@@ -1,5 +1,5 @@
 const { ApiError } = require("./errors");
-const DISCORD_API = "https://discord.com/api/v10";
+const { createTransport } = require("./discordTransport");
 const P = {
   ADMIN: 8n,
   MANAGE_GUILD: 32n,
@@ -55,56 +55,15 @@ function createDiscord({
   redirectUri,
   botToken,
   fetchImpl = fetch,
+  logger,
+  now,
 }) {
-  async function request(
-    path,
-    { accessToken, method = "GET", body, bot = false } = {},
-  ) {
-    let response;
-    try {
-      response = await fetchImpl(`${DISCORD_API}${path}`, {
-        method,
-        signal: AbortSignal.timeout(12000),
-        headers: {
-          ...(accessToken
-            ? { Authorization: `Bearer ${accessToken}` }
-            : bot
-              ? { Authorization: `Bot ${botToken}` }
-              : {}),
-          ...(body
-            ? { "Content-Type": "application/x-www-form-urlencoded" }
-            : {}),
-        },
-        body: body?.toString(),
-      });
-    } catch {
-      throw new ApiError(
-        503,
-        "DISCORD_UNAVAILABLE",
-        "O Discord está indisponível. Tente novamente.",
-      );
-    }
-    if (!response.ok) {
-      const status =
-        response.status === 401
-          ? 401
-          : response.status === 403
-            ? 403
-            : response.status === 404
-              ? 404
-              : response.status === 429
-                ? 429
-                : 502;
-      throw new ApiError(
-        status,
-        "DISCORD_ERROR",
-        status === 429
-          ? "O Discord limitou as solicitações. Aguarde antes de tentar novamente."
-          : "Não foi possível consultar o Discord.",
-      );
-    }
-    return response.status === 204 ? null : response.json();
-  }
+  const transport = createTransport({ fetchImpl, logger, now });
+  const request = (path, options = {}) =>
+    transport(path, {
+      ...options,
+      botToken: options.bot ? botToken : undefined,
+    });
   async function token(parameters) {
     const result = await request("/oauth2/token", {
       method: "POST",
@@ -138,13 +97,18 @@ function createDiscord({
         }),
       }),
     user: (accessToken) => request("/users/@me", { accessToken }),
-    async guilds(accessToken) {
+    async guilds(accessToken, context = {}) {
       let result = [],
         after = "";
       for (let page = 0; page < 10; page++) {
         const batch = await request(
           `/users/@me/guilds?limit=200${after ? `&after=${after}` : ""}`,
-          { accessToken },
+          {
+            accessToken,
+            ttl: context.fresh ? 0 : 30000,
+            stale: context.fresh ? 0 : 120000,
+            context,
+          },
         );
         result.push(...batch);
         if (batch.length < 200) return result;
@@ -152,7 +116,13 @@ function createDiscord({
       }
       return result;
     },
-    async metadata(guildId) {
+    async metadata(guildId, context = {}) {
+      const options = {
+        bot: true,
+        ttl: 60000,
+        stale: 600000,
+        context: { ...context, guildId },
+      };
       if (!botToken)
         throw new ApiError(
           503,
@@ -160,10 +130,10 @@ function createDiscord({
           "O token do bot ainda não foi configurado.",
         );
       const [guild, roles, channels, member] = await Promise.all([
-        request(`/guilds/${guildId}?with_counts=true`, { bot: true }),
-        request(`/guilds/${guildId}/roles`, { bot: true }),
-        request(`/guilds/${guildId}/channels`, { bot: true }),
-        request(`/guilds/${guildId}/members/${clientId}`, { bot: true }),
+        request(`/guilds/${guildId}?with_counts=true`, options),
+        request(`/guilds/${guildId}/roles`, options),
+        request(`/guilds/${guildId}/channels`, options),
+        request(`/guilds/${guildId}/members/${clientId}`, options),
       ]);
       const bits = guildPermissions(guildId, roles, member),
         highest = Math.max(

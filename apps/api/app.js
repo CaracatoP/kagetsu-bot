@@ -7,7 +7,13 @@ const { z } = require("zod");
 const { randomUUID } = require("node:crypto");
 const { createSecurity, csrfGuard } = require("./security");
 const { createAuth } = require("./auth");
-const { createDiscord, canManageGuild, inviteUrl } = require("./discord");
+const {
+  createDiscord,
+  canManageGuild,
+  inviteUrl,
+  has,
+  P,
+} = require("./discord");
 const { ApiError } = require("./errors");
 const {
   validateConfigReferences,
@@ -72,6 +78,7 @@ function createApp({
       clientSecret: env.DISCORD_CLIENT_SECRET,
       redirectUri: `${origin}/api/auth/callback`,
       botToken: env.DISCORD_TOKEN || env.TOKEN,
+      logger,
     });
   const auth = createAuth({
     pool,
@@ -82,6 +89,38 @@ function createApp({
     logger,
   });
   const app = express();
+  const localLimit = (operation) => (req, res) => {
+    const retryAfter = Math.max(
+      1,
+      Math.ceil(
+        ((req.rateLimit?.resetTime?.getTime() || Date.now() + 60000) -
+          Date.now()) /
+          1000,
+      ),
+    );
+    logger.warn(
+      {
+        event: "api_rate_limit",
+        source: "kagetsu",
+        guild_id: req.originalUrl.match(/\/guilds\/(\d+)/)?.[1],
+        operation,
+        endpoint: req.originalUrl.split("?")[0].replace(/\d{16,22}/g, ":id"),
+        status: 429,
+        retryAfter,
+        requestId: req.requestId,
+      },
+      "Limite local da API",
+    );
+    res.setHeader("Retry-After", String(retryAfter));
+    res.status(429).json({
+      error: {
+        code: "RATE_LIMIT",
+        message: `Muitas solicitações ao Kagetsu. Seus dados continuam salvos. Tente novamente em ${retryAfter} segundos.`,
+        retryAfter,
+        requestId: req.requestId,
+      },
+    });
+  };
   app.disable("x-powered-by");
   if (env.TRUST_PROXY_HOPS) {
     const hops = Number(env.TRUST_PROXY_HOPS);
@@ -106,6 +145,7 @@ function createApp({
     rateLimit({
       windowMs: 60000,
       limit: 180,
+      handler: localLimit("ip"),
       standardHeaders: "draft-7",
       legacyHeaders: false,
       message: {
@@ -131,19 +171,18 @@ function createApp({
           bot: rows[0]?.online ? "online" : "offline",
         });
       } catch {
-        res
-          .status(503)
-          .json({
-            status: "degraded",
-            database: "disconnected",
-            bot: "unknown",
-          });
+        res.status(503).json({
+          status: "degraded",
+          database: "disconnected",
+          bot: "unknown",
+        });
       }
     }),
   );
   const authLimit = rateLimit({
     windowMs: 60000,
     limit: 15,
+    handler: localLimit("login"),
     standardHeaders: "draft-7",
     legacyHeaders: false,
     message: {
@@ -168,6 +207,7 @@ function createApp({
     rateLimit({
       windowMs: 60000,
       limit: 120,
+      handler: localLimit("account"),
       keyGenerator: (req) => req.auth.user_id,
       standardHeaders: "draft-7",
       legacyHeaders: false,
@@ -179,12 +219,32 @@ function createApp({
       },
     }),
   );
+  app.use((req, res, next) => {
+    req.warnings = [];
+    const json = res.json.bind(res);
+    res.json = (body) =>
+      json(
+        body && typeof body === "object"
+          ? {
+              ...body,
+              ...(req.warnings.length ? { warnings: req.warnings } : {}),
+            }
+          : body,
+      );
+    next();
+  });
+  const context = (req) => ({
+    guildId: req.guildId,
+    operation: `${req.method} ${req.route?.path || req.originalUrl.split("?")[0].replace(/\d{16,22}/g, ":id")}`,
+    fresh: req.method !== "GET",
+    warn: (warning) => req.warnings.push(warning),
+  });
   app.post("/auth/logout", asyncRoute(auth.logout));
   app.get(
     "/guilds",
     asyncRoute(async (req, res) => {
       const guilds = (
-        await discord.guilds(await auth.accessToken(req.auth))
+        await discord.guilds(await auth.accessToken(req.auth), context(req))
       ).filter(canManageGuild);
       const { rows } = await pool.query(
         "SELECT id FROM guilds WHERE installed=true AND id=ANY($1::text[])",
@@ -203,12 +263,16 @@ function createApp({
       });
     }),
   );
-  // Authorization is fetched from Discord on every guild request, including every mutation.
+  // Read authorization has a bounded cache; mutations always revalidate against Discord.
   app.use(
     "/guilds/:guildId",
     asyncRoute(async (req, res, next) => {
       const guildId = snowflake.parse(req.params.guildId);
-      const guilds = await discord.guilds(await auth.accessToken(req.auth));
+      req.guildId = guildId;
+      const guilds = await discord.guilds(
+        await auth.accessToken(req.auth),
+        context(req),
+      );
       const guild = guilds.find((g) => g.id === guildId && canManageGuild(g));
       if (!guild)
         throw new ApiError(
@@ -221,8 +285,23 @@ function createApp({
       next();
     }),
   );
-  async function metadata(req) {
-    return req.metadata || (req.metadata = await discord.metadata(req.guildId));
+  async function metadata(req, optional = false) {
+    try {
+      return (
+        req.metadata ||
+        (req.metadata = await discord.metadata(req.guildId, context(req)))
+      );
+    } catch (error) {
+      if (!optional || ![429, 502, 503].includes(error.status)) throw error;
+      req.warnings.push({
+        code: error.code,
+        message: error.message,
+        retryAfter: error.retryAfter || 15,
+        endpoint: error.endpoint,
+        unavailable: true,
+      });
+      return null;
+    }
   }
   async function resource(req) {
     uuid.parse(req.params.resourceId);
@@ -255,23 +334,98 @@ function createApp({
   app.get(
     "/guilds/:guildId",
     asyncRoute(async (req, res) => {
-      const info = await metadata(req);
-      await store.ensureGuild(req.guildId, info.guild.name);
+      const info = await metadata(req, true);
+      await store.ensureGuild(
+        req.guildId,
+        info?.guild.name || req.discordGuild.name,
+      );
       const saved = await store.getConfig(req.guildId);
+      if (
+        info?.botPermissions &&
+        (saved.config.modules.tickets || saved.config.modules.tempVoice) &&
+        !has(info.botPermissions, P.MANAGE_CHANNELS)
+      )
+        info.permissions = {
+          ...info.permissions,
+          missing: [...info.permissions.missing, "ManageChannels"],
+        };
       const { rows } = await pool.query(
         "SELECT EXISTS(SELECT 1 FROM bot_status WHERE $1=ANY(guild_ids) AND last_seen>NOW()-INTERVAL '90 seconds') AS online",
         [req.guildId],
       );
       res.json({
-        guild: info.guild,
+        guild: info?.guild || req.discordGuild,
         ...saved,
-        channels: info.channels,
-        roles: info.roles,
-        permissions: info.permissions,
+        channels: info?.channels || [],
+        roles: info?.roles || [],
+        permissions: info?.permissions || { missing: [], unavailable: true },
+        metadataStatus: !info
+          ? "unavailable"
+          : req.warnings.length
+            ? "stale"
+            : "fresh",
         status: {
           bot: rows[0]?.online ? "online" : "offline",
           database: "connected",
         },
+      });
+    }),
+  );
+  app.get(
+    "/guilds/:guildId/diagnostics",
+    asyncRoute(async (req, res) => {
+      const [heartbeat, sync, jobs, saved] = await Promise.all([
+        pool.query(
+          "SELECT last_seen,latency_ms,last_seen>NOW()-INTERVAL '90 seconds' AS online FROM bot_status WHERE $1=ANY(guild_ids) ORDER BY last_seen DESC LIMIT 1",
+          [req.guildId],
+        ),
+        pool.query(
+          "SELECT synced_at,command_count FROM guild_command_sync WHERE guild_id=$1",
+          [req.guildId],
+        ),
+        pool.query(
+          "SELECT id,action,status,error,updated_at FROM bot_jobs WHERE guild_id=$1 AND error IS NOT NULL ORDER BY updated_at DESC LIMIT 10",
+          [req.guildId],
+        ),
+        store.getConfig(req.guildId),
+      ]);
+      const info = await metadata(req, true),
+        problems = [];
+      if (!info)
+        problems.push("Metadados Discord temporariamente indisponíveis.");
+      else {
+        if (
+          info.botPermissions &&
+          (saved.config.modules.tickets || saved.config.modules.tempVoice) &&
+          !has(info.botPermissions, P.MANAGE_CHANNELS)
+        )
+          problems.push("Permissão ausente: ManageChannels");
+        problems.push(
+          ...info.permissions.missing.map((p) => `Permissão ausente: ${p}`),
+        );
+        problems.push(
+          ...info.roles
+            .filter((r) => !r.managed && !r.manageable && r.id !== req.guildId)
+            .map((r) => `Cargo não gerenciável pelo bot: ${r.name}`),
+        );
+        try {
+          validateConfigReferences(saved.config, info);
+        } catch (error) {
+          problems.push(error.message);
+        }
+        if (saved.config.modules.welcome && !saved.config.welcome.channelId)
+          problems.push("Boas-vindas sem canal configurado.");
+        if (
+          saved.config.modules.tempVoice &&
+          !saved.config.tempVoice.triggerChannelId
+        )
+          problems.push("Salas temporárias sem canal de entrada.");
+      }
+      res.json({
+        bot: heartbeat.rows[0] || null,
+        sync: sync.rows[0] || null,
+        jobs: jobs.rows,
+        problems,
       });
     }),
   );
@@ -282,7 +436,8 @@ function createApp({
         .object({ config: configSchema, version })
         .strict()
         .parse(req.body);
-      validateConfigReferences(body.config, await metadata(req));
+      const info = await metadata(req, true);
+      if (info) validateConfigReferences(body.config, info);
       res.json(
         await store.saveConfig(
           req.guildId,
@@ -291,6 +446,17 @@ function createApp({
           body.version,
         ),
       );
+    }),
+  );
+  app.post(
+    "/guilds/:guildId/onboarding",
+    asyncRoute(async (req, res) => {
+      z.object({ skipped: z.boolean() }).strict().parse(req.body);
+      await pool.query(
+        "UPDATE guild_settings SET onboarding_completed_at=COALESCE(onboarding_completed_at,NOW()) WHERE guild_id=$1",
+        [req.guildId],
+      );
+      res.json({ completed: true });
     }),
   );
   app.get(
@@ -311,18 +477,17 @@ function createApp({
           .strict()
           .parse(req.body),
         data = parseResource(body.kind, body.data);
-      validateResourceReferences(body.kind, data, await metadata(req));
+      const info = await metadata(req, true);
+      if (info) validateResourceReferences(body.kind, data, info);
       await store.ensureGuild(req.guildId, req.discordGuild.name);
-      res
-        .status(201)
-        .json({
-          resource: await store.saveResource(
-            req.guildId,
-            body.kind,
-            data,
-            req.auth.user_id,
-          ),
-        });
+      res.status(201).json({
+        resource: await store.saveResource(
+          req.guildId,
+          body.kind,
+          data,
+          req.auth.user_id,
+        ),
+      });
     }),
   );
   app.put(
@@ -334,7 +499,8 @@ function createApp({
           .strict()
           .parse(req.body),
         data = parseResource(old.kind, body.data);
-      validateResourceReferences(old.kind, data, await metadata(req));
+      const info = await metadata(req, true);
+      if (info) validateResourceReferences(old.kind, data, info);
       res.json({
         resource: await store.saveResource(
           req.guildId,
@@ -411,14 +577,12 @@ function createApp({
         })
         .strict()
         .parse(req.body);
-      res
-        .status(202)
-        .json({
-          job: await enqueue(req, "suggestion_status", {
-            resourceId: old.id,
-            status,
-          }),
-        });
+      res.status(202).json({
+        job: await enqueue(req, "suggestion_status", {
+          resourceId: old.id,
+          status,
+        }),
+      });
     }),
   );
   app.get(
@@ -461,11 +625,11 @@ function createApp({
           'SELECT COALESCE(SUM(joins),0)::text AS joins,COALESCE(SUM(leaves),0)::text AS leaves,COALESCE(SUM(messages),0)::text AS messages,COALESCE(SUM(xp),0)::text AS xp,COALESCE(SUM(voice_seconds),0)::text AS "voiceSeconds",COUNT(DISTINCT user_id) FILTER(WHERE messages>0 OR voice_seconds>0)::text AS "activeMembers" FROM analytics_daily WHERE guild_id=$1 AND day>=CURRENT_DATE-($2::integer-1)',
           [req.guildId, Number(days)],
         ),
-        metadata(req),
+        metadata(req, true),
       ]);
       res.json({
         days: Number(days),
-        members: info.guild.memberCount,
+        members: info?.guild.memberCount ?? null,
         totals: totals[0],
         series,
       });
@@ -524,14 +688,12 @@ function createApp({
           "TICKET_NOT_FOUND",
           "Ticket não encontrado neste servidor.",
         );
-      res
-        .status(202)
-        .json({
-          job: await enqueue(req, "ticket_action", {
-            ticketId: req.params.ticketId,
-            action,
-          }),
-        });
+      res.status(202).json({
+        job: await enqueue(req, "ticket_action", {
+          ticketId: req.params.ticketId,
+          action,
+        }),
+      });
     }),
   );
   app.get(
@@ -552,18 +714,16 @@ function createApp({
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
     if (error instanceof z.ZodError)
-      return res
-        .status(422)
-        .json({
-          error: {
-            code: "VALIDATION",
-            message: "Verifique os campos informados.",
-            issues: error.issues.map((issue) => ({
-              path: issue.path.join("."),
-              message: issue.message,
-            })),
-          },
-        });
+      return res.status(422).json({
+        error: {
+          code: "VALIDATION",
+          message: "Verifique os campos informados.",
+          issues: error.issues.map((issue) => ({
+            path: issue.path.join("."),
+            message: issue.message,
+          })),
+        },
+      });
     const status =
       error.type === "entity.too.large"
         ? 413
@@ -579,31 +739,37 @@ function createApp({
         requestId: req.requestId,
         event: "api_request_failed",
         status,
+        guild_id: req.guildId,
+        operation: req.method,
+        endpoint: error.endpoint || req.route?.path,
+        retryAfter: error.retryAfter,
         code: error.code || "INTERNAL",
       },
       "Falha na requisição da API.",
     );
+    if (error.retryAfter)
+      res.setHeader("Retry-After", String(error.retryAfter));
     const safe = error instanceof ApiError || [404, 409].includes(status);
-    res
-      .status(status)
-      .json({
-        error: {
-          code:
-            error instanceof ApiError
-              ? error.code
-              : status === 413
-                ? "PAYLOAD_TOO_LARGE"
-                : status === 409
-                  ? "CONFLICT"
-                  : "REQUEST_FAILED",
-          message: safe
-            ? error.message
+    res.status(status).json({
+      error: {
+        code:
+          error instanceof ApiError
+            ? error.code
             : status === 413
-              ? "Conteúdo maior que o limite permitido."
-              : "Não foi possível concluir a solicitação.",
-          requestId: req.requestId,
-        },
-      });
+              ? "PAYLOAD_TOO_LARGE"
+              : status === 409
+                ? "CONFLICT"
+                : "REQUEST_FAILED",
+        message: safe
+          ? error.message
+          : status === 413
+            ? "Conteúdo maior que o limite permitido."
+            : "Não foi possível concluir a solicitação.",
+        retryAfter: error.retryAfter,
+        endpoint: error.endpoint,
+        requestId: req.requestId,
+      },
+    });
   });
   app.locals.auth = auth;
   app.locals.security = security;

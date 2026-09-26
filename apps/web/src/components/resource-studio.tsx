@@ -23,6 +23,7 @@ import {
   Confirm,
   Empty,
   ErrorBox,
+  useRetrySeconds,
   Field,
   MultiSelect,
   Panel,
@@ -196,9 +197,12 @@ export function ResourceStudio({
   kind: string;
 }) {
   const { notify } = useSession();
+  const retrySeconds = useRetrySeconds();
   const [resources, setResources] = useState<Resource[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [refreshWarning, setRefreshWarning] = useState("");
   const [selected, setSelected] = useState<Resource | null>(null);
   const [draft, setDraft] = useState<Data | null>(null);
   const [busy, setBusy] = useState("");
@@ -212,10 +216,13 @@ export function ResourceStudio({
     setLoading(true);
     setError("");
     try {
-      setResources(
-        (await api(`/guilds/${guildId}/resources?kind=${kind}`)).resources ||
-          [],
-      );
+      const result = await api(`/guilds/${guildId}/resources?kind=${kind}`);
+      if (!Array.isArray(result.resources))
+        throw new Error(
+          "Resposta inválida ao carregar recursos. Seus dados continuam salvos.",
+        );
+      setResources(result.resources);
+      setLoaded(true);
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -278,8 +285,30 @@ export function ResourceStudio({
         });
     const resource = result.resource || result;
     setSelected(resource);
+    setResources((previous) => [
+      resource,
+      ...previous.filter((item) => item.id !== resource.id),
+    ]);
+    setLoaded(true);
+    notify("Alterações salvas no banco.");
     setBaseline(JSON.stringify(draft));
     return resource;
+  }
+  async function refreshAfterSuccess(id: string) {
+    try {
+      const result = await api(`/guilds/${guildId}/resources?kind=${kind}`);
+      if (!Array.isArray(result.resources))
+        throw new Error("Resposta inválida na atualização da lista.");
+      setResources(result.resources);
+      const updated = result.resources.find((item: Resource) => item.id === id);
+      if (updated) setSelected(updated);
+      setRefreshWarning("");
+    } catch (error) {
+      setRefreshWarning(
+        "Operação concluída; os dados continuam salvos. A atualização da listagem está indisponível. " +
+          errorText(error),
+      );
+    }
   }
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -290,11 +319,11 @@ export function ResourceStudio({
     setBusy("Salvando…");
     setError("");
     try {
-      const resource = await save();
+      const resource = selected && !dirty ? selected : await save();
       if (intent !== "save") {
         setBusy("Aguardando o Kagetsu…");
         const action = kind === "embed" ? "send" : "publish";
-        await waitJob(
+        const job = await waitJob(
           guildId,
           await write(
             `/guilds/${guildId}/resources/${resource.id}/${action}`,
@@ -307,12 +336,19 @@ export function ResourceStudio({
                 : "Aguardando o Kagetsu…",
             ),
         );
-        const result = await api(`/guilds/${guildId}/resources?kind=${kind}`);
-        setResources(result.resources);
-        const updated = result.resources.find(
-          (item: Resource) => item.id === resource.id,
-        );
-        if (updated) setSelected(updated);
+        const published = {
+          ...resource,
+          status: "published",
+          channel_id: job.result?.channelId || resource.channel_id,
+          message_id: job.result?.messageId || resource.message_id,
+        };
+        setSelected(published);
+        setResources((previous) => [
+          published,
+          ...previous.filter((item) => item.id !== published.id),
+        ]);
+        notify("Operação concluída no Discord.");
+        await refreshAfterSuccess(resource.id);
         notify(
           kind === "embed"
             ? "Embed enviado ao Discord."
@@ -339,6 +375,9 @@ export function ResourceStudio({
     try {
       if (action === "delete") {
         await write(`/guilds/${guildId}/resources/${selected.id}`, "DELETE");
+        setResources((previous) =>
+          previous.filter((item) => item.id !== selected.id),
+        );
         close();
         await load();
         notify("Excluído.");
@@ -350,11 +389,20 @@ export function ResourceStudio({
             "POST",
           ),
         );
-        const result = await api(`/guilds/${guildId}/resources?kind=${kind}`);
-        setResources(result.resources);
-        setSelected(
-          result.resources.find((item: Resource) => item.id === selected.id),
+        const unpublished = {
+          ...selected,
+          status: "draft",
+          message_id: undefined,
+          channel_id: undefined,
+          published_data: null,
+        };
+        setSelected(unpublished);
+        setResources((previous) =>
+          previous.map((item) =>
+            item.id === selected.id ? unpublished : item,
+          ),
         );
+        await refreshAfterSuccess(selected.id);
         notify("Despublicado com sucesso.");
       }
     } catch (err) {
@@ -363,10 +411,18 @@ export function ResourceStudio({
       setBusy("");
     }
   }
-  if (loading && !draft) return <Spinner label={`Carregando ${plural}…`} />;
+  if (error && !loaded && !draft)
+    return <ErrorBox message={error} retry={load} />;
+  if (loading && !loaded && !draft)
+    return <Spinner label={`Carregando ${plural}…`} />;
   const options = draft?.options || [];
   return (
     <>
+      {refreshWarning && (
+        <div className="notice" role="status">
+          {refreshWarning}
+        </div>
+      )}
       {kind === "tickets" || kind === "ticket_panel" ? (
         <div className="tabs">
           <button
@@ -431,9 +487,11 @@ export function ResourceStudio({
                     >
                       {resource.status === "published"
                         ? "Publicado"
-                        : resource.status === "closed"
-                          ? "Encerrado"
-                          : "Rascunho"}
+                        : resource.message_id
+                          ? "Publicação incompleta"
+                          : resource.status === "closed"
+                            ? "Encerrado"
+                            : "Rascunho"}
                     </span>
                   </div>
                   <h3>
@@ -534,6 +592,14 @@ export function ResourceStudio({
               {dirty ? " · alterações não salvas" : ""}
             </span>
           </div>
+          {selected && (
+            <p className="subtle-note">
+              Salvo no banco.{" "}
+              {selected.published_data
+                ? "Há uma versão publicada no Discord. Salvar alterações não atualiza a mensagem; use Publicar."
+                : "Ainda não há uma versão publicada concluída no Discord."}
+            </p>
+          )}
           {error && <ErrorBox message={error} />}
           <div
             className={visibleEmbed.has(kind) ? "studio-grid" : "single-form"}
@@ -847,7 +913,7 @@ export function ResourceStudio({
                       type="button"
                       className="button secondary small"
                       onClick={() => setConfirm("unpublish")}
-                      disabled={!!busy}
+                      disabled={!!busy || retrySeconds > 0}
                     >
                       Despublicar
                     </button>
@@ -856,7 +922,7 @@ export function ResourceStudio({
                       type="button"
                       className="button danger-button small"
                       onClick={() => setConfirm("delete")}
-                      disabled={!!busy}
+                      disabled={!!busy || retrySeconds > 0}
                     >
                       <Trash2 size={14} />
                       Excluir
@@ -920,7 +986,11 @@ export function ResourceStudio({
                 type="submit"
                 data-intent="save"
                 className="button secondary"
-                disabled={!!busy || (kind === "role_panel" && !options.length)}
+                disabled={
+                  !!busy ||
+                  retrySeconds > 0 ||
+                  (kind === "role_panel" && !options.length)
+                }
               >
                 <Save size={16} />
                 Salvar{kind === "embed" ? " template" : ""}

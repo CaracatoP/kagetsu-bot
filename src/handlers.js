@@ -1,5 +1,6 @@
+const { commandEnabled } = require("../packages/shared/modules");
 const { Events, MessageFlags } = require("discord.js");
-const { commands, execute, slashCommands } = require("./commands");
+const { commands, execute } = require("./commands");
 const { randomXp } = require("./services/levelMath");
 const {
   eligibleForXp,
@@ -32,25 +33,7 @@ function attachHandlers(client, s) {
     await s.configs.get(guild.id);
   }
   async function register(guild) {
-    try {
-      const definitions = [...slashCommands, ...s.platform.slashCommands];
-      const current = await guild.commands.fetch();
-      const names = new Set(definitions.map((c) => c.name));
-      const extras = current
-        .filter((c) => !names.has(c.name))
-        .map((c) => ({
-          name: c.name,
-          type: c.type,
-          description: c.description,
-          options: c.options,
-          default_member_permissions:
-            c.defaultMemberPermissions?.bitfield.toString() ?? null,
-        }));
-      await guild.commands.set([...extras, ...definitions]);
-      logger.info({ guildId: guild.id }, "Slash commands registrados");
-    } catch (err) {
-      logger.error({ err, guildId: guild.id }, "Registro de comandos");
-    }
+    await s.store.enqueue(guild.id, client.user.id, "sync_commands", {});
   }
   on(Events.InteractionCreate, async (i) => {
     if (await s.platform.handleInteraction(i)) return;
@@ -64,7 +47,7 @@ function attachHandlers(client, s) {
         });
         return;
       }
-      if (!c.modules.levels) {
+      if (!commandEnabled(c, i.commandName)) {
         await i.reply({
           content: t(c.general.locale, "disabled"),
           flags: MessageFlags.Ephemeral,
@@ -119,7 +102,7 @@ function attachHandlers(client, s) {
       let name = tokens[0].toLowerCase();
       if (name === "lb") name = "leaderboard";
       if (commands[name]) {
-        if (!c.modules.levels) {
+        if (!commandEnabled(c, name)) {
           await m.reply(t(c.general.locale, "disabled"));
           return;
         }

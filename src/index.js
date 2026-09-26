@@ -15,6 +15,7 @@ const { createPlatform } = require("./platform");
 const { attachHandlers } = require("./handlers");
 const logger = require("../packages/shared/logger");
 async function main() {
+  require("./cards/fonts").ensureFonts();
   if (!process.env.DISCORD_TOKEN || !process.env.DATABASE_URL)
     throw new Error("Configure DISCORD_TOKEN e DATABASE_URL.");
   const pool = createDatabase(),
@@ -37,6 +38,7 @@ async function main() {
     ],
     rest: { timeout: 15000, retries: 2 },
   });
+  require("./platform/discordReliability").observeDiscord(client.rest, logger);
   const xp = createXpService(pool, configs),
     ranks = createRankService(pool, configs),
     metrics = createMetricsService(pool, configs);
@@ -73,8 +75,12 @@ async function main() {
     stopping = false;
   async function beat() {
     await pool.query(
-      "INSERT INTO bot_status(instance_id,guild_ids,last_seen) VALUES($1,$2,NOW()) ON CONFLICT(instance_id) DO UPDATE SET guild_ids=$2,last_seen=NOW()",
-      [instance, [...client.guilds.cache.keys()]],
+      "INSERT INTO bot_status(instance_id,guild_ids,last_seen,latency_ms) VALUES($1,$2,NOW(),$3) ON CONFLICT(instance_id) DO UPDATE SET guild_ids=$2,last_seen=NOW(),latency_ms=$3",
+      [
+        instance,
+        [...client.guilds.cache.keys()],
+        Math.max(0, Math.round(client.ws.ping)),
+      ],
     );
   }
   async function shutdown() {

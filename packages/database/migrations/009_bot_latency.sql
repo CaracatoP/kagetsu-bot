@@ -1,0 +1,1 @@
+ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS latency_ms INTEGER;

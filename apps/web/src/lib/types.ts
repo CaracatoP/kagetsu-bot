@@ -23,12 +23,14 @@ export type Role = {
   dangerous: boolean;
 };
 export type GuildContext = {
+  onboarding_completed_at?: string | null;
   guild: Guild;
+  metadataStatus?: string;
   config: Data;
   version: number;
   channels: Channel[];
   roles: Role[];
-  permissions: { missing: string[] };
+  permissions: { missing: string[]; unavailable?: boolean };
   status: Data;
 };
 export type Resource = {
@@ -36,6 +38,7 @@ export type Resource = {
   guild_id: string;
   kind: string;
   data: Data;
+  published_data?: Data | null;
   status: string;
   channel_id?: string;
   message_id?: string;
@@ -238,6 +241,12 @@ export const sections: Section[] = [
     name: "Auditoria",
     group: "Configurações",
     description: "Um registro transparente de cada alteração.",
+  },
+  {
+    id: "status",
+    name: "Status do Kagetsu",
+    group: "Configurações",
+    description: "Diagnóstico e integridade da configuração.",
   },
   {
     id: "setup",

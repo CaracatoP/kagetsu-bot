@@ -10,6 +10,11 @@ const actionPermissions = {
   slowmode: P.ManageChannels,
   lock: P.ManageChannels,
   unlock: P.ManageChannels,
+  untimeout: P.ModerateMembers,
+  clearwarnings: P.ModerateMembers,
+  unban: P.BanMembers,
+  nick: P.ManageNicknames,
+  purge: P.ManageMessages,
 };
 const userOption = {
   name: "usuario",
@@ -71,12 +76,73 @@ const definitions = {
   ],
   lock: ["Bloquear envio para everyone neste canal", []],
   unlock: ["Restaurar permissão anterior deste canal", []],
+  untimeout: ["Remover timeout", [userOption, reasonOption]],
+  clearwarnings: [
+    "Arquivar advertências do membro",
+    [
+      userOption,
+      reasonOption,
+      {
+        type: 5,
+        name: "confirmar",
+        description: "Confirmar arquivamento",
+        required: true,
+      },
+    ],
+  ],
+  unban: [
+    "Revogar banimento",
+    [
+      {
+        type: 3,
+        name: "id",
+        description: "ID do usuário banido",
+        required: true,
+      },
+      reasonOption,
+    ],
+  ],
+  nick: [
+    "Alterar apelido",
+    [
+      userOption,
+      {
+        type: 3,
+        name: "apelido",
+        description: "Novo apelido",
+        required: true,
+        max_length: 32,
+      },
+      reasonOption,
+    ],
+  ],
+  purge: [
+    "Apagar mensagens recentes",
+    [
+      {
+        type: 4,
+        name: "quantidade",
+        description: "Quantidade",
+        required: true,
+        min_value: 1,
+        max_value: 100,
+      },
+      {
+        type: 5,
+        name: "confirmar",
+        description: "Confirmar exclusão",
+        required: true,
+      },
+    ],
+  ],
 };
 const slashCommands = Object.entries(definitions).map(
   ([name, [description, options]]) => ({
     name,
     description,
-    options,
+    options: [...options].sort(
+      (a, b) => Number(!!b.required) - Number(!!a.required),
+    ),
     dm_permission: false,
     default_member_permissions: actionPermissions[name].toString(),
   }),
@@ -129,11 +195,30 @@ function ruleMatches(rule, message, samples) {
         word &&
         message.content.toLocaleLowerCase().includes(word.toLocaleLowerCase()),
     );
+  if (rule.type === "links")
+    return /https?:\/\/\S+|www\.\S+/i.test(message.content);
+  if (rule.type === "caps") {
+    const letters = message.content.match(/\p{L}/gu) || [];
+    return (
+      letters.length >= 8 &&
+      (letters.filter((c) => c === c.toUpperCase() && c !== c.toLowerCase())
+        .length /
+        letters.length) *
+        100 >=
+        (rule.threshold || 80)
+    );
+  }
+  if (rule.type === "emojis")
+    return (
+      (message.content.match(/\p{Extended_Pictographic}|<a?:\w+:\d+>/gu) || [])
+        .length >= threshold
+    );
   return false;
 }
 function createModeration(ctx) {
   const recent = new Map(),
-    punished = new Map();
+    punished = new Map(),
+    joins = new Map();
   async function record(
     guild,
     action,
@@ -150,7 +235,7 @@ function createModeration(ctx) {
     return rows[0];
   }
   async function perform(guild, actorId, data, system = false) {
-    const action = data.action,
+    const action = data.action === "purge" ? "clear" : data.action,
       required = actionPermissions[action];
     if (!required) throw new UserError("Ação de moderação inválida.");
     const config = await ctx.configs.get(guild.id);
@@ -253,16 +338,37 @@ function createModeration(ctx) {
             .slice(0, 1900)
         : "Nenhuma advertência.";
     }
+    if (action === "clearwarnings") {
+      if (!data.confirmed)
+        throw new UserError("Confirme o arquivamento das advertências.");
+      const target = await guild.members
+        .fetch(data.userId)
+        .catch(require("./ticketRoles").missingOnly(10007));
+      if (target) assertTarget(guild, moderator, target, me);
+      await ctx.pool.query(
+        "UPDATE moderation_cases SET action='warn_archived' WHERE guild_id=$1 AND target_user=$2 AND action='warn'",
+        [guild.id, data.userId],
+      );
+      await record(guild, action, data.userId, moderator.id, reason);
+      return "Advertências arquivadas; histórico preservado.";
+    }
+    if (action === "unban") {
+      await guild.members.unban(data.userId, reason);
+      await record(guild, action, data.userId, moderator.id, reason);
+      return "Banimento revogado.";
+    }
     return locked(
       ctx.pool,
       `moderation:${guild.id}:${data.userId}`,
       async (db) => {
         const target = await guild.members
           .fetch({ user: data.userId, force: true })
-          .catch(() => null);
+          .catch(require("./ticketRoles").missingOnly(10007));
         assertTarget(guild, moderator, target, me);
         if (action === "ban") await target.ban({ reason });
         if (action === "kick") await target.kick(reason);
+        if (action === "untimeout") await target.timeout(null, reason);
+        if (action === "nick") await target.setNickname(data.nickname, reason);
         if (action === "timeout") {
           if (!target.moderatable)
             throw new UserError("Este membro não pode receber timeout.");
@@ -341,9 +447,18 @@ function createModeration(ctx) {
     return result;
   }
   async function interaction(interaction) {
+    if (
+      ["purge", "clearwarnings"].includes(interaction.commandName) &&
+      !interaction.options.getBoolean("confirmar")
+    )
+      throw new UserError("Confirme a operação na opção confirmar.");
     const result = await run(interaction.guild, interaction.user.id, {
       action: interaction.commandName,
-      userId: interaction.options.getUser("usuario")?.id,
+      userId:
+        interaction.options.getUser("usuario")?.id ||
+        interaction.options.getString("id"),
+      nickname: interaction.options.getString("apelido"),
+      confirmed: interaction.options.getBoolean("confirmar"),
       reason: interaction.options.getString("motivo"),
       minutes: interaction.options.getInteger("minutos"),
       amount: interaction.options.getInteger("quantidade"),
@@ -373,32 +488,87 @@ function createModeration(ctx) {
       (item) => item.enabled && ruleMatches(item, message, samples),
     );
     if (!rule) return false;
-    if (rule.action === "delete") {
-      if (message.deletable) await message.delete();
-      return true;
-    }
     if ((punished.get(key) || 0) > now) return true;
     punished.set(key, now + 30_000);
+    await applyRule(message.guild, member, rule, message);
+    return true;
+  }
+  async function applyRule(guild, member, rule, message) {
+    await record(
+      guild,
+      "automod_trigger",
+      member.id,
+      ctx.client.user.id,
+      `AutoMod: ${rule.type}`,
+      { ruleId: rule.id },
+    );
+    const { rows } = await ctx.pool.query(
+      "SELECT COUNT(*)::int AS count FROM moderation_cases WHERE guild_id=$1 AND target_user=$2 AND action='automod_trigger' AND metadata->>'ruleId'=$3",
+      [guild.id, member.id, rule.id],
+    );
+    const escalation = (rule.escalation || [])
+      .filter((e) => e.count <= rows[0].count)
+      .sort((a, b) => b.count - a.count)[0];
+    const action = escalation?.action || rule.action;
+    if (action === "delete") {
+      if (message?.deletable) await message.delete();
+      return;
+    }
+    if (action === "log" || action === "alert") {
+      await ctx.log(
+        guild,
+        "moderation",
+        `AutoMod: ${rule.type} · <@${member.id}> · ocorrência ${rows[0].count}`,
+      );
+      return;
+    }
     await run(
-      message.guild,
+      guild,
       ctx.client.user.id,
       {
-        action: rule.action,
+        action,
         userId: member.id,
         reason: `AutoMod: ${rule.type}`,
-        minutes: rule.durationMinutes || 10,
+        minutes: escalation?.durationMinutes || rule.durationMinutes || 10,
       },
       true,
     );
-    return true;
+  }
+  async function onJoin(member) {
+    const config = await ctx.configs.get(member.guild.id);
+    if (
+      !config.modules.automod ||
+      member.user.bot ||
+      member.permissions.has(P.ManageGuild) ||
+      config.automod.whitelistRoleIds.some((id) => member.roles.cache.has(id))
+    )
+      return;
+    const now = Date.now(),
+      samples = (joins.get(member.guild.id) || []).filter(
+        (at) => now - at < 300000,
+      );
+    samples.push(now);
+    joins.set(member.guild.id, samples);
+    const rule = config.automod.rules.find(
+      (r) =>
+        r.enabled &&
+        ((r.type === "newAccount" &&
+          now - member.user.createdTimestamp < (r.threshold || 1) * 86400000) ||
+          (r.type === "joinBurst" &&
+            samples.filter((at) => now - at < (r.windowSeconds || 30) * 1000)
+              .length >= (r.threshold || 10))),
+    );
+    if (rule) await applyRule(member.guild, member, rule);
   }
   function cleanup() {
     const now = Date.now();
     for (const [key, value] of recent)
       if (value.at(-1)?.at < now - 300_000) recent.delete(key);
     for (const [key, until] of punished) if (until <= now) punished.delete(key);
+    for (const [id, samples] of joins)
+      if (samples.at(-1) < now - 300000) joins.delete(id);
   }
-  return { run, interaction, automod, cleanup };
+  return { run, interaction, automod, cleanup, onJoin };
 }
 module.exports = {
   createModeration,

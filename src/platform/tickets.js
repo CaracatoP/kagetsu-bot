@@ -6,7 +6,9 @@ const {
   ButtonStyle,
   AttachmentBuilder,
 } = require("discord.js");
-const { P, UserError, locked, embed, mentionless } = require("./common");
+const { P, UserError, embed, mentionless } = require("./common");
+const { durableLock } = require("./discordReliability");
+const { createTicketRoles, missingOnly } = require("./ticketRoles");
 
 function ticketPayload(resource) {
   const data = resource.data,
@@ -61,7 +63,23 @@ function escapeHtml(value) {
       ],
   );
 }
-async function transcript(channel) {
+function transcriptLink(url, label) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password)
+      return escapeHtml(label);
+    return `<a href="${escapeHtml(parsed.href)}" rel="noopener noreferrer">${escapeHtml(label)}</a>`;
+  } catch {
+    return escapeHtml(label);
+  }
+}
+function transcriptAvatar(author) {
+  const url = author?.displayAvatarURL?.({ extension: "png", size: 64 });
+  if (!url || !require("../../packages/shared/validation").isSafeImageUrl(url))
+    return "";
+  return `<img src="${escapeHtml(url)}" alt="Avatar" width="40" height="40" loading="lazy" referrerpolicy="no-referrer" style="border-radius:50%">`;
+}
+async function transcript(channel, ticket = {}, closedBy = "") {
   const messages = [];
   let before,
     truncated = false;
@@ -80,15 +98,16 @@ async function transcript(channel) {
   const body = messages
     .map(
       (message) =>
-        `<article><h3>${escapeHtml(message.author?.tag || message.author?.id || "Unknown")} · ${new Date(message.createdTimestamp).toISOString()}</h3><pre>${escapeHtml(message.content || "")}</pre>${[...message.attachments.values()].map((file) => `<p>Arquivo: ${escapeHtml(file.name)} — ${escapeHtml(file.url)}</p>`).join("")}${message.embeds.map((card) => `<pre>${escapeHtml([card.title, card.description].filter(Boolean).join("\n"))}</pre>`).join("")}</article>`,
+        `<article>${transcriptAvatar(message.author)}<h3>${escapeHtml(message.author?.tag || message.author?.id || "Unknown")}${message.author?.bot ? " [BOT]" : ""} · ${new Date(message.createdTimestamp).toISOString()}</h3><p>${transcriptLink(message.author?.displayAvatarURL?.({ extension: "png" }), "Avatar do autor")}</p><pre>${escapeHtml(message.content || "")}</pre>${[...message.attachments.values()].map((file) => `<p>Arquivo: ${transcriptLink(file.url, file.name || "Anexo")}</p>`).join("")}${message.embeds.map((card) => `<blockquote><pre>${escapeHtml([card.title, card.description, ...(card.fields || []).map((f) => `${f.name}: ${f.value}`)].filter(Boolean).join("\n"))}</pre>${card.url ? transcriptLink(card.url, "Link do embed") : ""}</blockquote>`).join("")}</article>`,
     )
     .join("\n");
   return {
     count: messages.length,
-    html: `<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>Ticket ${escapeHtml(channel.name)}</title><style>body{background:#101321;color:#edf0ff;font:15px system-ui;max-width:1000px;margin:30px auto;padding:20px}article{border-bottom:1px solid #45445a;padding:12px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}h3{color:#b49aff}</style><h1>${escapeHtml(channel.name)}</h1>${truncated ? "<p>Limite de segurança: últimas 10.000 mensagens. Exportações adicionais devem ser solicitadas antes de excluir o canal.</p>" : ""}${body}</html>`,
+    html: `<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src https://cdn.discordapp.com https://media.discordapp.net"><title>Ticket ${escapeHtml(channel.name)}</title><style>body{background:#101321;color:#edf0ff;font:15px system-ui;max-width:1000px;margin:30px auto;padding:20px}article{border-bottom:1px solid #45445a;padding:12px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}h3,a{color:#b49aff}</style><h1>${escapeHtml(channel.name)}</h1><p>Guild: ${escapeHtml(channel.guild?.name || channel.guildId || "")} · Canal: ${escapeHtml(channel.id)}</p><p>Ticket: ${escapeHtml(ticket.id || "")} · Autor: ${escapeHtml(ticket.owner_id || "")} · Atendente: ${escapeHtml(ticket.claimed_by || "Não atribuído")}</p><p>Abertura: ${escapeHtml(ticket.created_at || "")} · Fechamento: ${new Date().toISOString()} · Fechado por: ${escapeHtml(closedBy)}</p>${truncated ? "<p>Limite de segurança: últimas 10.000 mensagens. Exportações adicionais devem ser solicitadas antes de excluir o canal.</p>" : ""}${body}</html>`,
   };
 }
 function createTickets(ctx) {
+  const ticketRoles = createTicketRoles(ctx);
   async function open(interaction, resource, categoryId) {
     const guild = interaction.guild,
       data = resource.published_data || resource.data;
@@ -98,44 +117,51 @@ function createTickets(ctx) {
         : [{ id: "support", label: "Suporte" }]
     ).find((item) => item.id === categoryId);
     if (!category) throw new UserError("Categoria de ticket removida.");
-    return locked(
-      ctx.pool,
-      `ticket-open:${guild.id}:${resource.id}:${interaction.user.id}`,
-      async (db) => {
-        const { rows } = await db.query(
-          "SELECT channel_id FROM tickets WHERE guild_id=$1 AND resource_id=$2 AND owner_id=$3 AND status='open'",
-          [guild.id, resource.id, interaction.user.id],
+    return durableLock(ctx.pool, `tickets:${guild.id}`, async (db) => {
+      const { rows } = await db.query(
+        "SELECT * FROM tickets WHERE guild_id=$1 AND resource_id=$2 AND owner_id=$3 AND status='open'",
+        [guild.id, resource.id, interaction.user.id],
+      );
+      if (rows[0]?.channel_id && rows[0].provisioning_state === "ready") {
+        await interaction.editReply({
+          content: `Você já possui um ticket: <#${rows[0].channel_id}>`,
+        });
+        return;
+      }
+      const me = await guild.members.fetchMe();
+      if (!me.permissions.has(P.ManageChannels))
+        throw new UserError("O bot precisa de Gerenciar Canais.");
+      const supportRoles = [];
+      for (const id of data.supportRoleIds || []) {
+        const role = await guild.roles.fetch(id);
+        if (!role || id === guild.id)
+          throw new UserError("Cargo de suporte inválido.");
+        supportRoles.push(id);
+      }
+      const parent = data.categoryId
+        ? await guild.channels.fetch(data.categoryId)
+        : null;
+      if (parent && parent.type !== ChannelType.GuildCategory)
+        throw new UserError("Selecione uma categoria de canais válida.");
+      const id = rows[0]?.id || randomUUID(),
+        permissions = [
+          P.ViewChannel,
+          P.SendMessages,
+          P.ReadMessageHistory,
+          P.AttachFiles,
+          P.EmbedLinks,
+        ];
+      if (!rows[0])
+        await db.query(
+          "INSERT INTO tickets(id,guild_id,resource_id,owner_id,provisioning_state) VALUES($1,$2,$3,$4,'creating')",
+          [id, guild.id, resource.id, interaction.user.id],
         );
-        if (rows[0]) {
-          await interaction.editReply({
-            content: `Você já possui um ticket: <#${rows[0].channel_id}>`,
-          });
-          return;
-        }
-        const me = await guild.members.fetchMe();
-        if (!me.permissions.has(P.ManageChannels))
-          throw new UserError("O bot precisa de Gerenciar Canais.");
-        const supportRoles = [];
-        for (const id of data.supportRoleIds || []) {
-          const role = await guild.roles.fetch(id);
-          if (!role || id === guild.id)
-            throw new UserError("Cargo de suporte inválido.");
-          supportRoles.push(id);
-        }
-        const parent = data.categoryId
-          ? await guild.channels.fetch(data.categoryId)
-          : null;
-        if (parent && parent.type !== ChannelType.GuildCategory)
-          throw new UserError("Selecione uma categoria de canais válida.");
-        const id = randomUUID(),
-          permissions = [
-            P.ViewChannel,
-            P.SendMessages,
-            P.ReadMessageHistory,
-            P.AttachFiles,
-            P.EmbedLinks,
-          ];
-        const channel = await guild.channels.create({
+      const ticket = rows[0] || { id, owner_id: interaction.user.id };
+      const temporaryRole = await ticketRoles.ensure(guild, ticket, db);
+      const channels = await guild.channels.fetch();
+      const channel =
+        channels.find((c) => c?.topic?.startsWith(`Kagetsu ticket ${id} |`)) ||
+        (await guild.channels.create({
           name:
             `ticket-${interaction.user.username}`
               .toLowerCase()
@@ -146,7 +172,7 @@ function createTickets(ctx) {
           topic: `Kagetsu ticket ${id} | ${category.label}`.slice(0, 1024),
           permissionOverwrites: [
             { id: guild.id, deny: [P.ViewChannel] },
-            { id: interaction.user.id, allow: permissions },
+            { id: temporaryRole.id, allow: permissions },
             { id: me.id, allow: [...permissions, P.ManageChannels] },
             ...supportRoles.map((roleId) => ({
               id: roleId,
@@ -154,45 +180,49 @@ function createTickets(ctx) {
             })),
           ],
           reason: `Kagetsu: ticket de ${interaction.user.id}`,
-        });
-        try {
-          await db.query(
-            "INSERT INTO tickets(id,guild_id,resource_id,channel_id,owner_id) VALUES($1,$2,$3,$4,$5)",
-            [id, guild.id, resource.id, channel.id, interaction.user.id],
-          );
-          await channel.send(
-            mentionless({
-              content: `<@${interaction.user.id}> · ${category.label}`,
-              embeds: [
-                embed({
-                  title: "Ticket aberto",
-                  description:
-                    "Descreva o que você precisa. A equipe responderá neste canal.",
-                }),
-              ],
-              components: controls(id),
+        }));
+      await db.query(
+        "UPDATE tickets SET channel_id=$3,provisioning_state='ready',updated_at=NOW() WHERE guild_id=$1 AND id=$2",
+        [guild.id, id, channel.id],
+      );
+      await channel.send(
+        mentionless({
+          nonce: id.replaceAll("-", "").slice(0, 24),
+          enforceNonce: true,
+          content: `<@${interaction.user.id}> · ${category.label}`,
+          embeds: [
+            embed({
+              title: "Ticket aberto",
+              description:
+                "Descreva o que você precisa. A equipe responderá neste canal.",
             }),
-          );
-        } catch (error) {
-          await channel
-            .delete("Kagetsu: falha ao registrar ticket")
-            .catch(() => {});
-          throw error;
-        }
-        // A confirmação abaixo identifica o canal privado criado.
-        await interaction.editReply({
-          content: `Ticket criado: <#${channel.id}>`,
-        });
-      },
-    );
+          ],
+          components: controls(id),
+        }),
+      );
+      // A confirmação abaixo identifica o canal privado criado.
+      await interaction.editReply({
+        content: `Ticket criado: <#${channel.id}>`,
+      });
+    });
   }
-  async function action(guild, userId, id, operation) {
-    if (!["claim", "close", "reopen", "delete"].includes(operation))
+  async function action(guild, userId, id, operation, details = {}) {
+    if (
+      ![
+        "claim",
+        "close",
+        "reopen",
+        "delete",
+        "add",
+        "remove",
+        "rename",
+      ].includes(operation)
+    )
       throw new UserError("Ação de ticket inválida.");
     const config = await ctx.configs.get(guild.id);
-    const result = await locked(
+    const result = await durableLock(
       ctx.pool,
-      `ticket:${guild.id}:${id}`,
+      `tickets:${guild.id}`,
       async (db) => {
         const { rows } = await db.query(
           "SELECT * FROM tickets WHERE guild_id=$1 AND id=$2 FOR UPDATE",
@@ -219,9 +249,32 @@ function createTickets(ctx) {
           throw new UserError("Somente a equipe pode executar esta ação.");
         const channel = await guild.channels
           .fetch(ticket.channel_id)
-          .catch(() => null);
+          .catch(missingOnly(10003));
         if (!channel && operation !== "delete")
           throw new UserError("Canal do ticket removido.");
+        if (["add", "remove"].includes(operation)) {
+          const target = await guild.members.fetch(details.userId);
+          if (
+            target.id === ticket.owner_id ||
+            target.id === guild.members.me.id
+          )
+            throw new UserError(
+              "Use os controles do ticket para gerenciar o autor.",
+            );
+          if (operation === "add")
+            await channel.permissionOverwrites.edit(target.id, {
+              ViewChannel: true,
+              ReadMessageHistory: true,
+              SendMessages: ticket.status === "open",
+            });
+          else await channel.permissionOverwrites.delete(target.id);
+        }
+        if (operation === "rename") {
+          const name = String(details.name || "").trim();
+          if (!name || name.length > 90)
+            throw new UserError("Use um nome de 1 a 90 caracteres.");
+          await channel.setName(name, `Kagetsu ticket: ${userId}`);
+        }
         if (operation === "claim") {
           if (ticket.status !== "open")
             throw new UserError("Reabra o ticket antes de assumir.");
@@ -235,14 +288,17 @@ function createTickets(ctx) {
           );
         }
         if (operation === "close" && ticket.status !== "closed") {
-          const document = await transcript(channel);
-          await db.query(
-            "UPDATE tickets SET status='closed',closed_at=NOW(),transcript=$3,transcript_count=$4,updated_at=NOW() WHERE guild_id=$1 AND id=$2",
-            [guild.id, id, document.html, document.count],
+          const document = await transcript(channel, ticket, userId);
+          await channel.permissionOverwrites.edit(
+            ticket.temporary_role_id || ticket.owner_id,
+            {
+              SendMessages: false,
+            },
           );
-          await channel.permissionOverwrites.edit(ticket.owner_id, {
-            SendMessages: false,
-          });
+          if (ticket.temporary_role_id)
+            await channel.permissionOverwrites.edit(ticket.owner_id, {
+              SendMessages: false,
+            });
           const file = new AttachmentBuilder(
             Buffer.from(document.html, "utf8"),
             { name: `ticket-${id}.html` },
@@ -252,7 +308,13 @@ function createTickets(ctx) {
               content: `Ticket fechado por <@${userId}>. Transcript: ${document.count} mensagens.`,
               components: controls(id, true),
               files: [file],
+              nonce: require("./common").nonce(`close:${id}`),
+              enforceNonce: true,
             }),
+          );
+          await db.query(
+            "UPDATE tickets SET status='closed',closed_at=NOW(),transcript=$3,transcript_count=$4,updated_at=NOW() WHERE guild_id=$1 AND id=$2",
+            [guild.id, id, document.html, document.count],
           );
           const logId = config.tickets?.logChannelId;
           if (logId) {
@@ -273,9 +335,17 @@ function createTickets(ctx) {
             "UPDATE tickets SET status='open',closed_at=NULL,updated_at=NOW() WHERE guild_id=$1 AND id=$2",
             [guild.id, id],
           );
-          await channel.permissionOverwrites.edit(ticket.owner_id, {
-            SendMessages: true,
-          });
+          await channel.permissionOverwrites.edit(
+            ticket.temporary_role_id || ticket.owner_id,
+            {
+              SendMessages: true,
+            },
+          );
+          if (
+            ticket.temporary_role_id &&
+            channel.permissionOverwrites.cache.has(ticket.owner_id)
+          )
+            await channel.permissionOverwrites.delete(ticket.owner_id);
           await channel.send(
             mentionless({
               content: "Ticket reaberto.",
@@ -294,6 +364,7 @@ function createTickets(ctx) {
             "UPDATE tickets SET status='deleted',updated_at=NOW() WHERE guild_id=$1 AND id=$2",
             [guild.id, id],
           );
+          await ticketRoles.remove(guild, ticket, db);
         }
         return { ticketId: id, action: operation };
       },
@@ -313,7 +384,12 @@ function createTickets(ctx) {
     );
     return result;
   }
-  return { open, action, payload: ticketPayload };
+  return {
+    open,
+    action,
+    payload: ticketPayload,
+    reconcile: ticketRoles.reconcile,
+  };
 }
 module.exports = {
   createTickets,

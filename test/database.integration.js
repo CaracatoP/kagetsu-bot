@@ -174,9 +174,24 @@ test(
       assert.equal(stored.level, 2);
       assert.equal((await store.getConfig("B")).version, b.version);
       let sends = 0,
-        edits = 0;
+        edits = 0,
+        sendAttempts = 0,
+        sendRate = false,
+        reactionRate = false;
+      const limited = () =>
+        Object.assign(new Error("429 simulated"), {
+          status: 429,
+          retry_after: 30,
+        });
       const sent = {
         id: "discord-message",
+        reactions: { removeAll: async () => {} },
+        react: async () => {
+          if (reactionRate) {
+            reactionRate = false;
+            throw limited();
+          }
+        },
         edit: async (payload) => {
           assert.equal(payload.embeds[0].data.title, "Edited");
           edits++;
@@ -188,6 +203,11 @@ test(
         isTextBased: () => true,
         permissionsFor: () => ({ has: () => true }),
         send: async () => {
+          sendAttempts++;
+          if (sendRate) {
+            sendRate = false;
+            throw limited();
+          }
           sends++;
           return sent;
         },
@@ -265,6 +285,124 @@ test(
         sent.id,
       );
       assert.equal(await store.getResource("B", panel.id), null);
+      const reactionPanel = await store.saveResource(
+        "A",
+        "role_panel",
+        {
+          ...panel.data,
+          title: "Edited",
+          type: "reactions",
+          options: [
+            { id: "choice", label: "Role", roleId: "role", emoji: "✅" },
+          ],
+        },
+        "admin",
+      );
+      reactionRate = true;
+      const retryJob = await store.enqueue("A", "admin", "publish_resource", {
+        resourceId: reactionPanel.id,
+      });
+      const duplicateJob = await store.enqueue(
+        "A",
+        "admin",
+        "publish_resource",
+        { resourceId: reactionPanel.id },
+      );
+      assert.equal(
+        duplicateJob.id,
+        retryJob.id,
+        "active publish requests share a job",
+      );
+      await platform.processOnce();
+      const partial = await store.getResource("A", reactionPanel.id);
+      assert.equal(
+        partial.message_id,
+        sent.id,
+        "message checkpoint survives reaction 429",
+      );
+      assert.equal(
+        partial.published_data,
+        null,
+        "snapshot only changes after complete publication",
+      );
+      let pending = (
+        await pool.query("SELECT * FROM bot_jobs WHERE id=$1", [retryJob.id])
+      ).rows[0];
+      assert.equal(pending.status, "pending");
+      assert.ok(new Date(pending.available_at).getTime() > Date.now() + 20000);
+      const attemptsBefore = sendAttempts;
+      await platform.processOnce();
+      assert.equal(sendAttempts, attemptsBefore, "no retry before Retry-After");
+      await pool.query("UPDATE bot_jobs SET available_at=NOW() WHERE id=$1", [
+        retryJob.id,
+      ]);
+      await platform.processOnce();
+      assert.equal(
+        sendAttempts,
+        attemptsBefore,
+        "retry edits checkpointed message",
+      );
+      assert.equal(
+        (await store.getResource("A", reactionPanel.id)).status,
+        "published",
+      );
+      const newPanel = await store.saveResource(
+        "A",
+        "role_panel",
+        panel.data,
+        "admin",
+      );
+      sendRate = true;
+      const sendJob = await store.enqueue("A", "admin", "publish_resource", {
+        resourceId: newPanel.id,
+      });
+      await platform.processOnce();
+      assert.equal(
+        (await store.getResource("A", newPanel.id)).message_id,
+        null,
+      );
+      const beforeRetry = sends;
+      await platform.processOnce();
+      assert.equal(sends, beforeRetry);
+      await pool.query("UPDATE bot_jobs SET available_at=NOW() WHERE id=$1", [
+        sendJob.id,
+      ]);
+      await platform.processOnce();
+      assert.equal(
+        sends,
+        beforeRetry + 1,
+        "exactly one successful message after send 429",
+      );
+      assert.equal(
+        (await store.getResource("A", newPanel.id)).status,
+        "published",
+      );
+      const initialA = await store.getConfig("A");
+      assert.equal(initialA.onboarding_completed_at, null);
+      await pool.query(
+        "UPDATE guild_settings SET onboarding_completed_at=NOW() WHERE guild_id=$1",
+        ["A"],
+      );
+      assert.ok((await store.getConfig("A")).onboarding_completed_at);
+      assert.equal((await store.getConfig("B")).onboarding_completed_at, null);
+      initialA.config.modules.moderation = true;
+      const changed = await store.saveConfig(
+        "A",
+        initialA.config,
+        "admin",
+        initialA.version,
+      );
+      changed.config.modules.tickets = true;
+      await store.saveConfig("A", changed.config, "admin", changed.version);
+      const syncJobs = await pool.query(
+        "SELECT * FROM bot_jobs WHERE guild_id=$1 AND action='sync_commands' AND status='pending'",
+        ["A"],
+      );
+      assert.equal(syncJobs.rows.length, 1);
+      assert.equal(
+        (await store.getConfig("B")).config.modules.moderation,
+        false,
+      );
     } finally {
       await pool.end();
       if (created) await admin.query(`DROP SCHEMA "${schema}" CASCADE`);

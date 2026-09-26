@@ -1,0 +1,3 @@
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS temporary_role_id TEXT;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS provisioning_state TEXT NOT NULL DEFAULT 'ready';
+ALTER TABLE tickets ALTER COLUMN channel_id DROP NOT NULL;

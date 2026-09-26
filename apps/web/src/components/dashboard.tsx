@@ -30,12 +30,15 @@ import {
 } from "lucide-react";
 import { api, errorText, iconUrl, write } from "@/lib/api";
 import { sections, type GuildContext } from "@/lib/types";
-import { Brand, ErrorBox, Spinner, useSession } from "./ui";
+import { Brand, ErrorBox, Spinner, useSession, useRetrySeconds } from "./ui";
 import { Overview, Records } from "./overview";
 import { Settings } from "./settings";
 import { ResourceStudio } from "./resource-studio";
+import { Onboarding } from "./onboarding";
+import { Diagnostics } from "./diagnostics";
 
 const icons: Record<string, any> = {
+  status: Shield,
   overview: LayoutDashboard,
   levels: Sparkles,
   rewards: Trophy,
@@ -72,21 +75,27 @@ export function Dashboard({
   sectionId: string;
 }) {
   const session = useSession();
+  const retrySeconds = useRetrySeconds();
   const [data, setData] = useState<GuildContext | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [mobile, setMobile] = useState(false);
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    try {
-      setData(await api(`/guilds/${guildId}`));
-    } catch (err) {
-      setError(errorText(err));
-    } finally {
-      setLoading(false);
-    }
-  }, [guildId]);
+  const load = useCallback(
+    async (force = false) => {
+      setLoading(true);
+      setError("");
+      try {
+        setData(
+          await api(`/guilds/${guildId}`, force ? { cache: "reload" } : {}),
+        );
+      } catch (err) {
+        setError(errorText(err));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [guildId],
+  );
   useEffect(() => {
     if (session.user) void load();
     else if (!session.loading) setLoading(false);
@@ -141,6 +150,23 @@ export function Dashboard({
         <ErrorBox message={error} retry={load} />
       </main>
     );
+  if (data.onboarding_completed_at === null)
+    return (
+      <Onboarding
+        context={data}
+        guildId={guildId}
+        save={saveConfig}
+        done={() =>
+          setData(
+            (previous) =>
+              previous && {
+                ...previous,
+                onboarding_completed_at: new Date().toISOString(),
+              },
+          )
+        }
+      />
+    );
   let group = "";
   return (
     <div className="app-shell">
@@ -177,30 +203,36 @@ export function Dashboard({
           <ChevronDown size={15} />
         </Link>
         <nav className="sidebar-nav" aria-label="Menu principal">
-          {sections.map((item) => {
-            const heading = group !== item.group;
-            group = item.group;
-            const ItemIcon = icons[item.id];
-            const disabled = item.module && !data.config.modules?.[item.module];
-            return (
-              <div key={item.id}>
-                {heading && item.group && (
-                  <div className="nav-group">{item.group}</div>
-                )}
-                <Link
-                  className={`nav-item ${sectionId === item.id ? "active" : ""} ${disabled ? "module-off" : ""}`}
-                  href={`/guilds/${guildId}/${item.id}`}
-                  aria-current={sectionId === item.id ? "page" : undefined}
-                >
-                  <ItemIcon size={17} />
-                  <span>{item.name}</span>
-                  {disabled && (
-                    <span className="off-dot" title="Módulo desativado" />
+          {sections
+            .filter(
+              (item) =>
+                !item.module || data.config.modules?.[item.module] === true,
+            )
+            .map((item) => {
+              const heading = group !== item.group;
+              group = item.group;
+              const ItemIcon = icons[item.id];
+              const disabled =
+                item.module && !data.config.modules?.[item.module];
+              return (
+                <div key={item.id}>
+                  {heading && item.group && (
+                    <div className="nav-group">{item.group}</div>
                   )}
-                </Link>
-              </div>
-            );
-          })}
+                  <Link
+                    className={`nav-item ${sectionId === item.id ? "active" : ""} ${disabled ? "module-off" : ""}`}
+                    href={`/guilds/${guildId}/${item.id}`}
+                    aria-current={sectionId === item.id ? "page" : undefined}
+                  >
+                    <ItemIcon size={17} />
+                    <span>{item.name}</span>
+                    {disabled && (
+                      <span className="off-dot" title="Módulo desativado" />
+                    )}
+                  </Link>
+                </div>
+              );
+            })}
         </nav>
         <div className="sidebar-bottom">
           <div className="user-avatar">
@@ -285,8 +317,8 @@ export function Dashboard({
               <div>
                 <strong>Este módulo está desativado</strong>
                 <p>
-                  Você pode preparar as configurações agora. Ative o módulo para
-                  que o bot execute estas ações.
+                  Seus dados continuam salvos. Ative o módulo em Gerenciar
+                  módulos para acessar esta página.
                 </p>
                 <Link href={`/guilds/${guildId}/modules`}>
                   Gerenciar módulos <ChevronRight size={13} />
@@ -294,8 +326,30 @@ export function Dashboard({
               </div>
             </div>
           )}
-          {sectionId === "overview" ? (
+          {data.metadataStatus && data.metadataStatus !== "fresh" && (
+            <div className="notice" role="status">
+              <div>
+                <strong>Dados do Discord temporariamente desatualizados</strong>
+                <p>Configurações e recursos salvos continuam disponíveis.</p>
+                {retrySeconds > 0 ? (
+                  <p>Atualize em {retrySeconds} segundos.</p>
+                ) : (
+                  <button
+                    className="button secondary small"
+                    onClick={() => void load(true)}
+                  >
+                    Atualizar dados do Discord
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+          {section?.module &&
+          !data.config.modules?.[section.module] ? null : sectionId ===
+            "overview" ? (
             <Overview guildId={guildId} data={data} />
+          ) : sectionId === "status" ? (
+            <Diagnostics guildId={guildId} />
           ) : sectionId === "audit" ? (
             <Records guildId={guildId} kind="audit" />
           ) : section?.kind ? (

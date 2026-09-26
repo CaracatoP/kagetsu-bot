@@ -1,3 +1,4 @@
+const { isDiscordEmoji } = require("./emoji");
 const { z } = require("zod");
 
 const snowflake = z.string().regex(/^\d{16,22}$/, "ID do Discord inválido.");
@@ -58,31 +59,35 @@ const reward = z
     requiredRoleId: optionalId,
   })
   .strict();
-const action = z.enum(["delete", "warn", "timeout"]);
-const moduleNames = [
-  "levels",
-  "roles",
-  "welcome",
-  "moderation",
-  "automod",
-  "logs",
-  "tickets",
-  "suggestions",
-  "events",
-  "giveaways",
-  "tempVoice",
-  "scheduler",
-  "customCommands",
-  "achievements",
-  "missions",
-  "seasons",
-  "prestige",
-];
+const action = z.enum([
+  "delete",
+  "warn",
+  "timeout",
+  "kick",
+  "ban",
+  "alert",
+  "log",
+]);
+const { MODULES: moduleNames } = require("./modules");
 const xpRange = {
   enabled: z.boolean(),
   min: integer(0, 100000),
   max: integer(0, 100000),
 };
+const welcomeDesign = z
+  .object({
+    title: z.string().max(256).optional(),
+    description: z.string().max(2000).optional(),
+    color: color.optional(),
+    imageUrl,
+    thumbnailUrl: imageUrl,
+    backgroundUrl: imageUrl,
+    footer: z.string().max(500).optional(),
+    showAvatar: z.boolean().optional(),
+    showName: z.boolean().optional(),
+    overlay: z.number().min(0).max(1).optional(),
+  })
+  .strict();
 const configSchema = z
   .object({
     general: z
@@ -169,7 +174,11 @@ const configSchema = z
           .object({
             id: stableId,
             name: short.min(1),
-            emoji: z.string().max(100),
+            emoji: z
+              .string()
+              .trim()
+              .max(100)
+              .refine(isDiscordEmoji, "Use um único emoji ou <:nome:id>."),
             baseRoleId: snowflake,
             exclusiveGroup: short,
             mode: z.enum(["highest", "stack"]),
@@ -201,7 +210,12 @@ const configSchema = z
               .object({
                 id: stableId,
                 name: short.min(1),
-                emoji: z.string().max(100).optional(),
+                emoji: z
+                  .string()
+                  .trim()
+                  .max(100)
+                  .refine(isDiscordEmoji, "Use um único emoji ou <:nome:id>.")
+                  .optional(),
                 roleId: optionalId,
               })
               .strict(),
@@ -213,7 +227,11 @@ const configSchema = z
       .object({
         channelId: optionalId,
         message: z.string().max(2000),
-        type: z.enum(["text", "embed", "card"]),
+        type: z.enum(["text", "embed", "card", "mixed"]),
+        leaveType: z.enum(["text", "embed", "card", "mixed"]).optional(),
+        design: welcomeDesign.optional(),
+        leaveDesign: welcomeDesign.optional(),
+        dmMessage: z.string().max(2000).optional(),
         leaveChannelId: optionalId,
         leaveMessage: z.string().max(2000),
         autoroleIds: ids,
@@ -263,13 +281,36 @@ const configSchema = z
             z
               .object({
                 id: stableId,
-                type: z.enum(["spam", "flood", "invite", "mentions", "words"]),
+                type: z.enum([
+                  "spam",
+                  "flood",
+                  "invite",
+                  "mentions",
+                  "words",
+                  "links",
+                  "caps",
+                  "emojis",
+                  "newAccount",
+                  "joinBurst",
+                ]),
                 enabled: z.boolean(),
                 action,
                 threshold: integer(1, 100).optional(),
                 windowSeconds: integer(1, 300).optional(),
                 durationMinutes: integer(1, 40320).optional(),
                 words: z.array(z.string().min(1).max(80)).max(200).optional(),
+                escalation: z
+                  .array(
+                    z
+                      .object({
+                        count: integer(1, 100),
+                        action,
+                        durationMinutes: integer(1, 40320).optional(),
+                      })
+                      .strict(),
+                  )
+                  .max(10)
+                  .optional(),
               })
               .strict(),
           )
@@ -309,7 +350,12 @@ const resourceSchemas = {
             .object({
               id: stableId,
               label: z.string().min(1).max(80),
-              emoji: z.string().max(100).optional(),
+              emoji: z
+                .string()
+                .trim()
+                .max(100)
+                .refine(isDiscordEmoji, "Use um único emoji ou <:nome:id>.")
+                .optional(),
               roleId: snowflake,
             })
             .strict(),
@@ -423,7 +469,11 @@ const resourceSchemas = {
     .object({
       name: short.min(1),
       description: z.string().max(1000),
-      emoji: z.string().max(100),
+      emoji: z
+        .string()
+        .trim()
+        .max(100)
+        .refine(isDiscordEmoji, "Use um único emoji ou <:nome:id>."),
       condition: z.enum(["level", "messages", "voiceMinutes"]),
       value: integer(1, 100000000),
     })

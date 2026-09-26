@@ -146,7 +146,7 @@ export function Overview({
             <strong>
               {loading ? (
                 <span className="skeleton-number" />
-              ) : stat.value === undefined ? (
+              ) : stat.value == null || (!!error && !analytics) ? (
                 "—"
               ) : stat.name === "Horas em voz" ? (
                 String(stat.value).replace(".", ",")
@@ -182,7 +182,7 @@ export function Overview({
         >
           {loading ? (
             <Spinner label="Reunindo os números…" />
-          ) : series.length ? (
+          ) : error && !analytics ? null : series.length ? (
             <>
               <div className="chart-summary">
                 <strong>{formatNumber(total)}</strong>
@@ -253,14 +253,22 @@ export function Overview({
               <UserPlus size={18} />
             </span>
             <span>Novos membros</span>
-            <strong>{loading ? "—" : formatNumber(totals.joins)}</strong>
+            <strong>
+              {loading || (!!error && !analytics)
+                ? "—"
+                : formatNumber(totals.joins)}
+            </strong>
           </div>
           <div className="community-metric">
             <span className="metric-symbol red">
               <ArrowDownLeft size={18} />
             </span>
             <span>Saídas</span>
-            <strong>{loading ? "—" : formatNumber(totals.leaves)}</strong>
+            <strong>
+              {loading || (!!error && !analytics)
+                ? "—"
+                : formatNumber(totals.leaves)}
+            </strong>
           </div>
           <div className="community-metric">
             <span className="metric-symbol purple">
@@ -268,7 +276,9 @@ export function Overview({
             </span>
             <span>Membros ativos</span>
             <strong>
-              {loading ? "—" : formatNumber(totals.activeMembers)}
+              {loading || (!!error && !analytics)
+                ? "—"
+                : formatNumber(totals.activeMembers)}
             </strong>
           </div>
           <div className="health-list">
@@ -303,11 +313,13 @@ export function Overview({
                 Permissões
               </span>
               <span
-                className={`badge ${!data.permissions?.missing?.length ? "green" : ""}`}
+                className={`badge ${!data.permissions?.unavailable && !data.permissions?.missing?.length ? "green" : ""}`}
               >
-                {data.permissions?.missing?.length
-                  ? `${data.permissions.missing.length} pendências`
-                  : "Verificadas"}
+                {data.permissions?.unavailable
+                  ? "Indisponíveis"
+                  : data.permissions?.missing?.length
+                    ? `${data.permissions.missing.length} pendências`
+                    : "Verificadas"}
               </span>
             </div>
           </div>
@@ -412,7 +424,7 @@ export function Records({
       {error && <ErrorBox message={error} retry={load} />}
       {loading ? (
         <Spinner />
-      ) : !rows.length ? (
+      ) : error && !rows.length ? null : !rows.length ? (
         <Empty
           icon={<ShieldCheck size={27} />}
           title="Tudo começa com uma boa base"
@@ -544,7 +556,7 @@ export function Operations({
         {error && <ErrorBox message={error} retry={load} />}
         {loading ? (
           <Spinner />
-        ) : !rows.length ? (
+        ) : error && !rows.length ? null : !rows.length ? (
           <Empty
             icon={<Ticket size={28} />}
             title="Um espaço para ouvir"

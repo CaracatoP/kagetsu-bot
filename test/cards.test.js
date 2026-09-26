@@ -36,3 +36,17 @@ test("cards renderizam com fallback de avatar e XP zero", async () => {
     assert.equal(image.height, height);
   }
 });
+
+test("packaged fonts paint text without system fonts and from a different working directory", () => {
+  const { execFileSync } = require("node:child_process");
+  const path = require("node:path");
+  const target = path.resolve(__dirname, "../src/cards/fonts.js");
+  execFileSync(
+    process.execPath,
+    ["-e", `require(${JSON.stringify(target)}).ensureFonts()`],
+    {
+      cwd: require("node:os").tmpdir(),
+      env: { ...process.env, DISABLE_SYSTEM_FONTS_LOAD: "1" },
+    },
+  );
+});

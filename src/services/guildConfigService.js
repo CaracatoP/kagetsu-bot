@@ -8,6 +8,8 @@ function createGuildConfigService(pool, store, { ttl = 60000 } = {}) {
     reconnect;
   function invalidate(id) {
     cache.delete(id);
+    // Detach an in-flight read; it must not repopulate the cache after NOTIFY.
+    pending.delete(id);
     for (const fn of listeners) fn(id);
   }
   async function get(id) {
@@ -17,10 +19,13 @@ function createGuildConfigService(pool, store, { ttl = 60000 } = {}) {
     const task = store
       .getConfig(id)
       .then((row) => {
+        if (pending.get(id) !== task) return get(id);
         cache.set(id, { config: row.config, expires: Date.now() + ttl });
         return row.config;
       })
-      .finally(() => pending.delete(id));
+      .finally(() => {
+        if (pending.get(id) === task) pending.delete(id);
+      });
     pending.set(id, task);
     return task;
   }
@@ -38,6 +43,9 @@ function createGuildConfigService(pool, store, { ttl = 60000 } = {}) {
         if (!stopped) reconnect = setTimeout(() => void start(), 5000);
       });
       await connection.query("LISTEN kagetsu_config");
+      // Notifications during a disconnect cannot be replayed by PostgreSQL.
+      for (const id of new Set([...cache.keys(), ...pending.keys()]))
+        invalidate(id);
     } catch (err) {
       logger.warn({ err }, "Config listener");
       if (!stopped) reconnect = setTimeout(() => void start(), 5000);

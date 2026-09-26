@@ -85,7 +85,10 @@ export default function Home() {
           </div>
           <div className="guild-toolbar">
             <h2>
-              Meus servidores <span className="count">{guilds.length}</span>
+              Meus servidores{" "}
+              <span className="count">
+                {guildError && !guilds.length ? "—" : guilds.length}
+              </span>
             </h2>
             <input
               aria-label="Buscar servidor"

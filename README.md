@@ -177,3 +177,7 @@ Intents: Guilds, GuildMembers, GuildMessages, MessageContent, GuildVoiceStates e
 - A verificação automatizada não substitui testes no Discord real de ações destrutivas, hierarquia, tickets e consentimento OAuth com uma conta administradora.
 
 Referências oficiais: [OAuth Discord](https://discord.com/developers/docs/topics/oauth2), [comandos e permissões](https://docs.discord.com/developers/docs/interactions/slash-commands) e [Next.js](https://nextjs.org/docs/app/getting-started/installation).
+
+## Correção de rate limit do dashboard
+
+Veja [diagnóstico, cache, Retry-After, contagens e testes](docs/RATE_LIMIT_FIX.md). A migration `005_delivery_checkpoint` preserva recursos/XP e adiciona checkpoints de publicação. Reinicie bot, API e web após atualizar. Leituras de permissões usam cache curto; mutações continuam verificando permissões atuais no Discord. Metadados têm TTL de 60 segundos e fallback temporário; a listagem de recursos permanece no PostgreSQL.

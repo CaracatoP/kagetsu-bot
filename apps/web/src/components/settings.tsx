@@ -27,6 +27,9 @@ import {
   Toggle,
 } from "./ui";
 import { Records } from "./overview";
+import { WelcomeBuilder } from "./welcome-builder";
+import { ModuleDetails } from "./module-details";
+import { EscalationEditor } from "./escalation-editor";
 
 const newReward = () => ({
   id: crypto.randomUUID(),
@@ -285,6 +288,7 @@ export function Settings({
                     value={draft.modules[key]}
                     onChange={(value) => set(`modules.${key}`, value)}
                   />
+                  <ModuleDetails id={key} />
                 </div>
               ))}
             </div>
@@ -568,25 +572,11 @@ export function Settings({
         )}
         {section === "welcome" && (
           <>
-            <div className="two-columns">
-              {welcome}
-              <Panel
-                title="Até a próxima"
-                description="Uma mensagem quando alguém deixar o servidor."
-              >
-                {channel("welcome.leaveChannelId", "Canal de saída")}
-                <Field label="Mensagem de saída">
-                  <textarea
-                    value={draft.welcome.leaveMessage}
-                    rows={4}
-                    maxLength={2000}
-                    onChange={(e) =>
-                      set("welcome.leaveMessage", e.target.value)
-                    }
-                  />
-                </Field>
-              </Panel>
-            </div>
+            <WelcomeBuilder
+              value={draft.welcome}
+              context={context}
+              onChange={(value) => set("welcome", value)}
+            />
             <Panel
               title="Cargos de entrada"
               description="O primeiro passo de cada novo membro."
@@ -1069,6 +1059,13 @@ export function Settings({
                           <option value="invite">Convites do Discord</option>
                           <option value="mentions">Menções em massa</option>
                           <option value="words">Palavras bloqueadas</option>
+                          <option value="links">Links</option>
+                          <option value="caps">
+                            Maiúsculas excessivas (%)
+                          </option>
+                          <option value="emojis">Emojis excessivos</option>
+                          <option value="newAccount">Conta nova (dias)</option>
+                          <option value="joinBurst">Entradas em massa</option>
                         </select>
                       </Field>
                       <Field label="Ação">
@@ -1077,11 +1074,25 @@ export function Settings({
                           onChange={(e) => change("action", e.target.value)}
                         >
                           <option value="delete">Apagar mensagem</option>
-                          <option value="warn">Apagar e advertir</option>
-                          <option value="timeout">Apagar e dar timeout</option>
+                          <option value="warn">Advertir</option>
+                          <option value="timeout">Timeout</option>
+                          <option value="kick">Expulsar</option>
+                          <option value="ban">Banir</option>
+                          <option value="alert">
+                            Enviar alerta no canal de logs
+                          </option>
+                          <option value="log">Registrar no log</option>
                         </select>
                       </Field>
-                      {["spam", "flood", "mentions"].includes(rule.type) && (
+                      {[
+                        "spam",
+                        "flood",
+                        "mentions",
+                        "caps",
+                        "emojis",
+                        "newAccount",
+                        "joinBurst",
+                      ].includes(rule.type) && (
                         <Field label="Limite">
                           <input
                             type="number"
@@ -1094,7 +1105,7 @@ export function Settings({
                           />
                         </Field>
                       )}
-                      {["spam", "flood"].includes(rule.type) && (
+                      {["spam", "flood", "joinBurst"].includes(rule.type) && (
                         <Field label="Janela (segundos)">
                           <input
                             type="number"
@@ -1135,6 +1146,10 @@ export function Settings({
                         />
                       </Field>
                     )}
+                    <EscalationEditor
+                      value={rule.escalation}
+                      onChange={(value) => change("escalation", value)}
+                    />
                     <button
                       type="button"
                       className="button secondary small"

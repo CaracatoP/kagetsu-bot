@@ -1,17 +1,16 @@
 const { DateTime } = require("luxon");
-const { ChannelType, AttachmentBuilder } = require("discord.js");
+const { ChannelType } = require("discord.js");
 const {
   P,
   UserError,
   substitute,
-  embed,
   channel,
   locked,
   mentionless,
   nonce,
 } = require("./common");
 const { validateRole } = require("./roles");
-const { base, text, avatar } = require("../cards/shared");
+
 function nextRun(data, timezone, after = Date.now()) {
   if (data.recurrence === "none") return null;
   const start = DateTime.fromISO(data.runAt).setZone(timezone);
@@ -49,47 +48,24 @@ function createAutomation(ctx) {
     const id = leaving ? c.welcome.leaveChannelId : c.welcome.channelId;
     if (id) {
       const dest = await channel(member.guild, id);
-      const content = substitute(
-        leaving ? c.welcome.leaveMessage : c.welcome.message,
-        { user: member.user, guild: member.guild },
+      await dest.send(
+        await require("./welcome").welcomePayload(member, c, leaving),
       );
-      if (!leaving && c.welcome.type === "card") {
-        const { canvas, ctx: draw } = base(350, "BOAS-VINDAS", c.appearance);
-        await avatar(draw, member.user, 65, 133, 130);
-        text(draw, member.displayName, 235, 181, 780, 32);
-        text(
-          draw,
-          content.replaceAll(`<@${member.id}>`, member.displayName),
-          235,
-          234,
-          780,
-          20,
-        );
-        await dest.send(
+    }
+    if (!leaving && c.welcome.dmMessage) {
+      const {
+        renderTemplate,
+        welcomeData,
+      } = require("../../packages/shared/welcome");
+      try {
+        await member.send(
           mentionless({
-            files: [
-              new AttachmentBuilder(canvas.toBuffer("image/png"), {
-                name: "welcome.png",
-              }),
-            ],
+            content: renderTemplate(c.welcome.dmMessage, welcomeData(member)),
           }),
         );
-      } else
-        await dest.send(
-          mentionless(
-            !leaving && c.welcome.type === "embed"
-              ? {
-                  embeds: [
-                    embed({
-                      title: member.guild.name,
-                      description: content,
-                      color: c.appearance.primary,
-                    }),
-                  ],
-                }
-              : { content },
-          ),
-        );
+      } catch (error) {
+        if (error.code !== 50007) throw error;
+      }
     }
     if (!leaving && c.welcome.autoroleIds.length)
       await ctx.pool.query(
@@ -337,3 +313,4 @@ function createAutomation(ctx) {
   };
 }
 module.exports = { createAutomation, nextRun };
+

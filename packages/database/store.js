@@ -26,13 +26,13 @@ function createStore(pool) {
   }
   async function getConfig(id) {
     let { rows } = await pool.query(
-      "SELECT config,version FROM guild_settings WHERE guild_id=$1",
+      "SELECT config,version,onboarding_completed_at FROM guild_settings WHERE guild_id=$1",
       [id],
     );
     if (!rows[0]) {
       await ensureGuild(id);
       ({ rows } = await pool.query(
-        "SELECT config,version FROM guild_settings WHERE guild_id=$1",
+        "SELECT config,version,onboarding_completed_at FROM guild_settings WHERE guild_id=$1",
         [id],
       ));
     }
@@ -57,7 +57,7 @@ function createStore(pool) {
       const {
         rows: [old],
       } = await db.query(
-        "SELECT config,version FROM guild_settings WHERE guild_id=$1 FOR UPDATE",
+        "SELECT config,version,onboarding_completed_at FROM guild_settings WHERE guild_id=$1 FOR UPDATE",
         [gid],
       );
       if (version !== undefined && old.version !== version) throw conflict();
@@ -78,6 +78,20 @@ function createStore(pool) {
         );
       }
       await writeAudit(db, gid, uid, "config.update", gid, old.config, config);
+      if (
+        JSON.stringify(old.config.modules) !== JSON.stringify(config.modules)
+      ) {
+        // One pending reconciliation per guild; delay coalesces rapid toggles.
+        const pending = await db.query(
+          "UPDATE bot_jobs SET available_at=NOW()+INTERVAL '3 seconds' WHERE guild_id=$1 AND action='sync_commands' AND status='pending' RETURNING id",
+          [gid],
+        );
+        if (!pending.rows.length)
+          await db.query(
+            "INSERT INTO bot_jobs(id,guild_id,actor_id,action,payload,available_at) VALUES($1,$2,$3,'sync_commands','{}',NOW()+INTERVAL '3 seconds')",
+            [randomUUID(), gid, uid],
+          );
+      }
       await db.query("SELECT pg_notify('kagetsu_config',$1)", [gid]);
       return saved;
     });
@@ -102,6 +116,9 @@ function createStore(pool) {
   }
   async function saveResource(gid, kind, data, uid, id, version) {
     return transaction(pool, async (db) => {
+      await db.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+        `resource:${gid}`,
+      ]);
       let old;
       if (id) {
         old = (
@@ -137,6 +154,9 @@ function createStore(pool) {
   }
   async function deleteResource(gid, id, uid) {
     return transaction(pool, async (db) => {
+      await db.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+        `resource:${gid}`,
+      ]);
       const old = (
         await db.query(
           "SELECT * FROM guild_resources WHERE guild_id=$1 AND id=$2 FOR UPDATE",
@@ -144,7 +164,11 @@ function createStore(pool) {
         )
       ).rows[0];
       if (!old) throw missing();
-      if (old.message_id || old.status === "published")
+      if (
+        old.message_id ||
+        old.status === "published" ||
+        ["sending", "uncertain"].includes(old.delivery_state)
+      )
         throw Object.assign(
           new Error("Despublique a mensagem antes de excluir."),
           { status: 409 },
@@ -168,14 +192,34 @@ function createStore(pool) {
       return old;
     });
   }
-  async function enqueue(gid, uid, action, payload) {
-    return (
-      await pool.query(
-        "INSERT INTO bot_jobs(id,guild_id,actor_id,action,payload) VALUES($1,$2,$3,$4,$5) RETURNING *",
-        [randomUUID(), gid, uid, action, JSON.stringify(payload)],
-      )
-    ).rows[0];
+  async function enqueue(gid, uid, action, payload, delaySeconds = 0) {
+    return transaction(pool, async (db) => {
+      await db.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+        `job:${gid}:${action}:${payload.resourceId || payload.ticketId || ""}`,
+      ]);
+      const active = (
+        await db.query(
+          "SELECT * FROM bot_jobs WHERE guild_id=$1 AND action=$2 AND payload=$3::jsonb AND status IN ('pending','running') ORDER BY created_at LIMIT 1",
+          [gid, action, JSON.stringify(payload)],
+        )
+      ).rows[0];
+      if (active) return active;
+      return (
+        await db.query(
+          "INSERT INTO bot_jobs(id,guild_id,actor_id,action,payload,available_at) VALUES($1,$2,$3,$4,$5,NOW()+$6*INTERVAL '1 second') RETURNING *",
+          [
+            randomUUID(),
+            gid,
+            uid,
+            action,
+            JSON.stringify(payload),
+            delaySeconds,
+          ],
+        )
+      ).rows[0];
+    });
   }
+
   return {
     ensureGuild,
     getConfig,

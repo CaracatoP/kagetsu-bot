@@ -6,6 +6,7 @@ import {
   useContext,
   useEffect,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import {
@@ -16,7 +17,16 @@ import {
   Plus,
   X,
 } from "lucide-react";
-import { api, errorText, setCsrf, write } from "@/lib/api";
+import {
+  subscribeDiscord,
+  getRetryDeadline,
+  getDiscordWarning,
+  clearDiscordWarning,
+  api,
+  errorText,
+  setCsrf,
+  write,
+} from "@/lib/api";
 import type { Channel, Role, User } from "@/lib/types";
 
 type Session = {
@@ -85,6 +95,7 @@ export function Providers({ children }: { children: ReactNode }) {
         notify: (message, error) => setToast({ message, error }),
       }}
     >
+      <DiscordNotice />
       {children}
       {toast && (
         <div
@@ -126,6 +137,50 @@ export function Spinner({ label = "Carregando…" }: { label?: string }) {
     </div>
   );
 }
+export function useRetrySeconds() {
+  const deadline = useSyncExternalStore(
+    subscribeDiscord,
+    getRetryDeadline,
+    () => 0,
+  );
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    setNow(Date.now());
+    if (deadline <= Date.now()) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [deadline]);
+  return Math.max(0, Math.ceil((deadline - now) / 1000));
+}
+function DiscordNotice() {
+  const message = useSyncExternalStore(
+    subscribeDiscord,
+    getDiscordWarning,
+    () => "",
+  );
+  return message ? (
+    <div
+      className="notice"
+      style={{
+        position: "fixed",
+        top: 80,
+        right: 24,
+        maxWidth: "min(440px, 90vw)",
+        zIndex: 100,
+        background: "#242033",
+      }}
+      role="status"
+    >
+      <span>Dados salvos preservados. {message}</span>
+      <button
+        aria-label="Fechar aviso do Discord"
+        onClick={clearDiscordWarning}
+      >
+        <X size={16} />
+      </button>
+    </div>
+  ) : null;
+}
 export function ErrorBox({
   message,
   retry,
@@ -133,13 +188,15 @@ export function ErrorBox({
   message: string;
   retry?: () => void;
 }) {
+  const retrySeconds = useRetrySeconds();
   return (
     <div className="notice danger" role="alert">
       <AlertTriangle size={20} />
       <div>
         <strong>Não foi possível concluir</strong>
         <p>{message}</p>
-        {retry && (
+        {retrySeconds > 0 && <p>Tente novamente em {retrySeconds} segundos.</p>}
+        {retry && retrySeconds === 0 && (
           <button className="button secondary small" onClick={retry}>
             Tentar novamente
           </button>

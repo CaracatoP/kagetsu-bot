@@ -100,7 +100,7 @@ test("XP administrativo exige permissão e inteiros válidos", async () => {
 test("slash commands expõem opções e subcomandos tipados", () => {
   assert.deepEqual(
     slashCommands.map((c) => c.name),
-    ["rank", "leaderboard", "prestige", "perfil", "xp"],
+    ["level", "rank", "leaderboard", "prestige", "perfil", "xp"],
   );
   const xp = slashCommands.find((c) => c.name === "xp");
   assert.equal(

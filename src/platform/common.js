@@ -26,9 +26,7 @@ const strings = {
 function t(config, key) {
   return (strings[config?.general?.locale] || strings["pt-BR"])[key] || key;
 }
-function enabled(config, name) {
-  return config?.modules?.[name] === true;
-}
+const { enabled } = require("../../packages/shared/modules");
 function substitute(text, { user, guild, channel }) {
   return String(text || "").replace(
     /\{(user|username|server|channel|memberCount)\}/g,
@@ -112,7 +110,12 @@ async function actor(guild, userId, permission = P.ManageGuild) {
   return member;
 }
 async function channel(guild, id, permission = P.SendMessages) {
-  const result = id ? await guild.channels.fetch(id).catch(() => null) : null;
+  const result = id
+    ? await guild.channels.fetch(id).catch((error) => {
+        if (error.code === 10003) return null;
+        throw error;
+      })
+    : null;
   const me = guild.members.me || (await guild.members.fetchMe());
   if (
     !result ||
@@ -133,23 +136,38 @@ function mentionless(payload) {
   return { ...payload, allowedMentions: { parse: [], repliedUser: false } };
 }
 function createResourceCache(store) {
-  const cache = new Map();
+  const cache = new Map(),
+    pending = new Map();
+  function invalidate(guildId) {
+    for (const key of new Set([...cache.keys(), ...pending.keys()])) {
+      if (key.startsWith(`${guildId}:`)) {
+        cache.delete(key);
+        pending.delete(key);
+      }
+    }
+  }
+  async function list(guildId, kind) {
+    const key = `${guildId}:${kind}`,
+      entry = cache.get(key);
+    if (entry && entry.until > Date.now()) return entry.rows;
+    if (pending.has(key)) return pending.get(key);
+    const task = store
+      .listResources(guildId, kind)
+      .then((rows) => {
+        if (pending.get(key) !== task) return list(guildId, kind);
+        cache.set(key, { rows, until: Date.now() + 30_000 });
+        if (cache.size > 5000) cache.delete(cache.keys().next().value);
+        return rows;
+      })
+      .finally(() => {
+        if (pending.get(key) === task) pending.delete(key);
+      });
+    pending.set(key, task);
+    return task;
+  }
   return {
-    async list(guildId, kind) {
-      const key = `${guildId}:${kind}`,
-        entry = cache.get(key);
-      if (entry && entry.until > Date.now()) return entry.rows;
-      const rows = await store.listResources(guildId, kind);
-      cache.set(key, { rows, until: Date.now() + 30_000 });
-      if (cache.size > 5000)
-        for (const [id, item] of cache)
-          if (item.until <= Date.now()) cache.delete(id);
-      return rows;
-    },
-    invalidate(guildId) {
-      for (const key of cache.keys())
-        if (key.startsWith(`${guildId}:`)) cache.delete(key);
-    },
+    list,
+    invalidate,
   };
 }
 module.exports = {

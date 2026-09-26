@@ -4,6 +4,7 @@ const {
   InteractionContextType,
 } = require("discord.js");
 const commands = {
+  level: require("./rank"),
   rank: require("./rank"),
   leaderboard: require("./leaderboard"),
   perfil: require("./profile"),
@@ -13,6 +14,10 @@ const commands = {
 const userOption = (option) =>
   option.setName("usuario").setDescription("Usuário que deseja consultar");
 const slashCommands = [
+  new SlashCommandBuilder()
+    .setName("level")
+    .setDescription("Consultar nível e XP")
+    .addUserOption(userOption),
   new SlashCommandBuilder()
     .setName("rank")
     .setDescription("Mostra seu rank no Kagetsu")

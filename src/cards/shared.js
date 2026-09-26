@@ -1,4 +1,6 @@
 const { createCanvas, loadImage } = require("@napi-rs/canvas");
+const { ensureFonts } = require("./fonts");
+ensureFonts();
 const { totalXpForLevel } = require("../services/levelMath");
 const colors = {
   text: "#f4f2ff",
@@ -25,7 +27,7 @@ function text(
   color = colors.text,
   bold = false,
 ) {
-  ctx.font = `${bold ? "bold " : ""}${size}px sans-serif, "Segoe UI Emoji", "Noto Color Emoji", "Apple Color Emoji"`;
+  ctx.font = `${bold ? "bold " : ""}${size}px "Kagetsu Sans", "Kagetsu Emoji", sans-serif`;
   ctx.fillStyle = color;
   ctx.fillText(truncate(ctx, value, width), x, y);
 }
