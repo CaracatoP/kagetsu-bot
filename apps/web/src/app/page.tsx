@@ -263,6 +263,10 @@ export default function Home() {
       )}
       <footer className="public-footer">
         <span>© {new Date().getFullYear()} Kagetsu</span>
+        <nav className="legal-links" aria-label="Documentos legais">
+          <Link href="/termos-de-servico">Termos de Serviço</Link>
+          <Link href="/politica-de-privacidade">Política de Privacidade</Link>
+        </nav>
         <span>Comunidades grandes começam com boas conexões.</span>
         <span className="footer-moon">
           <Moon size={14} /> Feito para Discord

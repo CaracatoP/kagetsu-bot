@@ -658,6 +658,27 @@ svg {
   align-items: center;
   gap: 6px;
 }
+.legal-links {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+.legal-links a:hover {
+  color: var(--purple);
+}
+.legal-main h1 {
+  margin-bottom: 28px;
+}
+.legal-content {
+  min-height: 240px;
+  max-width: 850px;
+  color: var(--muted);
+  line-height: 1.8;
+}
+.legal-content p {
+  margin-bottom: 16px;
+}
 .app-shell {
   min-height: 100vh;
 }

@@ -380,6 +380,10 @@ export function Dashboard({
           <span>
             <Moon size={13} /> Kagetsu Dashboard
           </span>
+          <nav className="legal-links" aria-label="Documentos legais">
+            <Link href="/termos-de-servico">Termos de Serviço</Link>
+            <Link href="/politica-de-privacidade">Política de Privacidade</Link>
+          </nav>
           <span>Um espaço para sua comunidade crescer.</span>
         </footer>
       </div>
