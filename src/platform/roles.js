@@ -75,6 +75,39 @@ function roleDelta(resources, resource, current, chosenIds, toggle = false) {
     remove: [...controlled].filter((id) => current.has(id) && !target.has(id)),
   };
 }
+function selectFairOption(options, countByOption) {
+  const minimum = Math.min(
+    ...options.map((option) => countByOption.get(option.id) || 0),
+  );
+  const candidates = options.filter(
+    (option) => (countByOption.get(option.id) || 0) === minimum,
+  );
+  return candidates[Math.floor(Math.random() * candidates.length)];
+}
+async function fairOption(db, resource, options, guildId, userId) {
+  const existing = await db.query(
+    "SELECT option_id FROM role_panel_fair_assignments WHERE guild_id=$1 AND resource_id=$2 AND user_id=$3",
+    [guildId, resource.id, userId],
+  );
+  if (existing.rows[0] && options.some((option) => option.id === existing.rows[0].option_id))
+    return existing.rows[0].option_id;
+
+  const counts = await db.query(
+    "SELECT option_id, COUNT(*)::integer AS count FROM role_panel_fair_assignments WHERE guild_id=$1 AND resource_id=$2 GROUP BY option_id",
+    [guildId, resource.id],
+  );
+  const countByOption = new Map(
+    counts.rows.map((row) => [row.option_id, row.count]),
+  );
+  const selected = selectFairOption(options, countByOption);
+  await db.query(
+    `INSERT INTO role_panel_fair_assignments(guild_id,resource_id,user_id,option_id)
+     VALUES($1,$2,$3,$4)
+     ON CONFLICT(guild_id,resource_id,user_id) DO UPDATE SET option_id=EXCLUDED.option_id,assigned_at=NOW()`,
+    [guildId, resource.id, userId, selected.id],
+  );
+  return selected.id;
+}
 function rolePayload(resource) {
   const data = resource.data,
     options = (data.options || []).map((option) => ({
@@ -97,10 +130,14 @@ function rolePayload(resource) {
     const select = new StringSelectMenuBuilder()
       .setCustomId(`kg:role:${resource.id}:select`)
       .setPlaceholder(
-        data.mode === "single" ? "Escolha um cargo" : "Escolha seus cargos",
+        data.mode === "fair"
+          ? "Receber um cargo"
+          : data.mode === "single"
+            ? "Escolha um cargo"
+            : "Escolha seus cargos",
       )
       .setMinValues(0)
-      .setMaxValues(data.mode === "single" ? 1 : options.length)
+      .setMaxValues(data.mode === "single" || data.mode === "fair" ? 1 : options.length)
       .addOptions(
         options.map((option) => ({
           label: option.label.slice(0, 100),
@@ -125,6 +162,8 @@ function rolePayload(resource) {
       );
   } else if (data.type !== "reactions")
     throw new UserError("Tipo de painel inválido.");
+  if (data.mode === "fair" && data.type === "reactions")
+    throw new UserError("Escolha justa não funciona com reações.");
   const card = embed(data);
   if (data.type === "reactions") {
     if (options.some((option) => !option.emoji))
@@ -150,14 +189,27 @@ function createRoles(ctx) {
     const delta = await locked(
       ctx.pool,
       `roles:${guild.id}:${userId}`,
-      async () => {
+      async (db) => {
         const member = await guild.members.fetch({ user: userId, force: true });
+        const data = panelData(resource);
+        const fairChosen =
+          data.mode === "fair"
+            ? [
+                await fairOption(
+                  db,
+                  resource,
+                  data.options || [],
+                  guild.id,
+                  userId,
+                ),
+              ]
+            : chosen;
         const delta = roleDelta(
           resources,
           resource,
           new Set(member.roles.cache.keys()),
-          chosen,
-          toggle,
+          fairChosen,
+          data.mode === "fair" ? false : toggle,
         );
         for (const id of [...delta.add, ...delta.remove])
           await validateRole(guild, id);
@@ -252,5 +304,6 @@ module.exports = {
   rolePayload,
   validateRole,
   panelData,
+  selectFairOption,
   dangerous,
 };

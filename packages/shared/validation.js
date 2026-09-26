@@ -342,7 +342,7 @@ const resourceSchemas = {
       ...common,
       title: z.string().min(1).max(256),
       type: z.enum(["buttons", "select", "reactions"]),
-      mode: z.enum(["single", "multiple"]),
+      mode: z.enum(["single", "multiple", "fair"]),
       group: short.optional(),
       options: z
         .array(
@@ -381,6 +381,12 @@ const resourceSchemas = {
         ctx.addIssue({
           code: "custom",
           message: "Reações exigem emojis únicos.",
+        });
+      if (v.mode === "fair" && v.type === "reactions")
+        ctx.addIssue({
+          code: "custom",
+          message:
+            "Escolha justa está disponível apenas em botões ou menu de seleção.",
         });
     }),
   embed: z

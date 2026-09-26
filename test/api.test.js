@@ -180,6 +180,15 @@ test("exclusive role groups and immutable published panel behavior", () => {
   assert.equal(payload.components[0].components.length, 2);
   assert.match(payload.components[0].components[0].data.custom_id, /panel:a$/);
 });
+test("fair role panels choose randomly among the least-used options", () => {
+  const { selectFairOption } = require("../src/platform/roles");
+  const options = [{ id: "x" }, { id: "y" }, { id: "z" }];
+  assert.ok(options.includes(selectFairOption(options, new Map())));
+  assert.notEqual(
+    selectFairOption(options, new Map([["x", 2], ["y", 1], ["z", 1]])).id,
+    "x",
+  );
+});
 test("scheduled recurrence preserves local time across DST and weekday choices", () => {
   const next = nextRun(
     { runAt: "2026-03-07T14:00:00Z", recurrence: "daily" },

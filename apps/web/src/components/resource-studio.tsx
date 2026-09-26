@@ -697,6 +697,7 @@ export function ResourceStudio({
                             Permitir vários cargos
                           </option>
                           <option value="single">Apenas um cargo</option>
+                          <option value="fair">Escolha justa (aleatório equilibrado)</option>
                         </select>
                       </Field>
                     </div>
@@ -715,6 +716,13 @@ export function ResourceStudio({
                       <div className="inline-note">
                         Ao escolher um novo cargo, o anterior neste grupo é
                         removido automaticamente.
+                      </div>
+                    )}
+                    {draft.mode === "fair" && (
+                      <div className="inline-note">
+                        Cada membro recebe uma opção aleatória. O Kagetsu
+                        distribui as opções menos usadas primeiro para manter
+                        as quantidades equilibradas.
                       </div>
                     )}
                   </Panel>
